@@ -1,7 +1,7 @@
 import json
 from types import SimpleNamespace
 
-from hello_agent.recorder import TraceRecorder
+from agent_v3.recorder import TraceRecorder
 
 # Stand-ins for the Strands hook events: the recorder only reads these attributes.
 TOOL_USE = {"name": "current_time", "toolUseId": "tooluse_1", "input": {"timezone": "UTC"}}
@@ -12,7 +12,7 @@ def test_writes_one_numbered_line_per_step(tmp_path):
     agent = SimpleNamespace(
         system_prompt="You are a helpful assistant.",
         tool_registry=SimpleNamespace(get_all_tool_specs=lambda: [{"name": "current_time"}]),
-        messages=[{"role": "user", "content": [{"text": "hi"}]}],
+        messages=[{"role": "user", "content": [{"text": "What time is it in Tokyo?"}]}],
     )
 
     recorder.on_model_request(SimpleNamespace(agent=agent))

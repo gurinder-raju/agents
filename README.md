@@ -1,7 +1,9 @@
 # agents
 
-A generic hello-world agent, built one layer at a time to learn how agents work end to end:
-agent, harness, inference, gateway and tools. Local first (Ollama), then AWS (Strands, Bedrock, AgentCore).
+An experimental, portable agent design: one agent that runs locally on Ollama or in the cloud on AWS Bedrock and AgentCore.
+
+The agent here is **agent-v3**, built on the Strands Harness SDK one layer at a time: agent, harness,
+inference, gateway and tools. It runs locally first, then on AWS.
 
 The architecture diagrams live in [agent-stack.html](agent-stack.html).
 
@@ -13,8 +15,8 @@ Needs [uv](https://docs.astral.sh/uv/) and [Ollama](https://ollama.com/download)
 
 ```bash
 ollama pull gemma4:e2b
-uv run hello-agent "What time is it in Tokyo?"
-uv run hello-agent "Go through the new posts in r/Python. For each one, tell me which Python libraries the post or its comments mention."
+uv run agent-v3 "What time is it in Tokyo?"
+uv run agent-v3 "Go through the new posts in r/Python. For each one, tell me which Python libraries the post or its comments mention."
 uv run pytest
 ```
 

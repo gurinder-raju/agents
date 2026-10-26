@@ -1,7 +1,7 @@
 [project]
-name = "hello-agent"
+name = "agent-v3"
 version = "0.1.0"
-description = "A generic hello-world agent for learning the agent stack one layer at a time."
+description = "An experimental, portable agent design: one agent that runs locally on Ollama or in the cloud on AWS Bedrock and AgentCore."
 requires-python = ">=3.12"
 dependencies = [
     "strands-agents[ollama]>=1.62,<2",
@@ -9,7 +9,7 @@ dependencies = [
 ]
 
 [project.scripts]
-hello-agent = "hello_agent.cli:main"
+agent-v3 = "agent_v3.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]

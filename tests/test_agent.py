@@ -1,7 +1,7 @@
 from strands.vended_plugins.skills import Skill
 
-from hello_agent.agent import build_agent
-from hello_agent.recorder import TraceRecorder
+from agent_v3.agent import build_agent
+from agent_v3.recorder import TraceRecorder
 
 # These build the real agent and read the real skill files without calling the model.
 # Run pytest from the repo folder so skills/ is found.

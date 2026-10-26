@@ -96,7 +96,7 @@ def http_get(url: str) -> httpx.Response:
     with httpx.Client(
         follow_redirects=True,
         timeout=20,
-        headers={"User-Agent": "hello-agent/0.1"},
+        headers={"User-Agent": "agent-v3/0.1"},
         event_hooks={"request": [refuse_non_public_host]},
     ) as client:
         # One request at a time, so tool calls the model makes in parallel share the host's budget.
