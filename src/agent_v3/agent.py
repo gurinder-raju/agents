@@ -7,6 +7,7 @@ from strands import Agent
 from strands.models.ollama import OllamaModel
 from strands.vended_plugins.skills import AgentSkills
 
+from .empty_reply_retry import EmptyReplyRetry
 from .recorder import TraceRecorder
 from .skill_redirect import SkillNameRedirect
 from .tools import current_time, fetch_url, read_feed, read_subreddit, write_report
@@ -14,8 +15,9 @@ from .tools import current_time, fetch_url, read_feed, read_subreddit, write_rep
 # Generic on purpose. Instructions for a specific job belong in job files under jobs/, which git ignores.
 SYSTEM_PROMPT = """You are a helpful assistant.
 Use your tools when they help you answer. If you can't do something, say so plainly.
-Skills listed under available_skills are not tools. To use one, call the `skills` tool with its name,
-then follow the instructions it returns."""
+When the user asks for a report, save it with write_report, even when nothing matched.
+Skills listed under available_skills are not tools. If one fits the task, call the `skills` tool with
+its name before anything else, then follow the instructions it returns."""
 
 # Each skill is a folder with a SKILL.md. skills/ holds generic ones and is committed;
 # jobs/skills/ is for your own, and git ignores it. Paths are relative to where you run the agent.
@@ -39,6 +41,7 @@ def build_agent(recorder: TraceRecorder) -> Agent:
         model=model,
         tools=[current_time, fetch_url, read_feed, read_subreddit, write_report],
         system_prompt=SYSTEM_PROMPT,
-        hooks=[recorder, SkillNameRedirect(skills)],
+        # Registered after the recorder, so it runs first after a model call and the trace shows its retries.
+        hooks=[recorder, SkillNameRedirect(skills), EmptyReplyRetry()],
         plugins=[skills],
     )

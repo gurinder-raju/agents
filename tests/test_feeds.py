@@ -1,7 +1,9 @@
+import fcntl
 import json
 from datetime import UTC, datetime, timedelta
 
 import httpx
+import pytest
 
 from agent_v3 import tools
 from agent_v3.tools import parse_feed, read_feed
@@ -64,12 +66,22 @@ def test_read_feed_keeps_only_recent_entries(monkeypatch):
     assert result["omitted"] == 0
 
 
-def test_rate_limit_headers_delay_the_next_request(monkeypatch):
-    monkeypatch.setattr(tools, "_next_request_at", {})
+def test_rate_limits_are_shared_through_a_file_per_host(tmp_path, monkeypatch):
+    monkeypatch.setattr(tools, "RATE_LIMIT_DIR", tmp_path)
     exhausted = httpx.Response(200, headers={"x-ratelimit-remaining": "0.0", "x-ratelimit-reset": "30"})
-    tools._remember_rate_limit("www.reddit.com", exhausted)
-    wait = tools._next_request_at["www.reddit.com"] - tools.time.monotonic()
-    assert 29 < wait <= 31
+    with tools._host_turn("www.reddit.com") as turn:
+        tools._remember_rate_limit(exhausted, turn)
+        # While one agent holds a host's turn, another can't take it.
+        with open(tmp_path / "www.reddit.com") as other, pytest.raises(BlockingIOError):
+            fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with tools._host_turn("example.com") as turn:
+        tools._remember_rate_limit(httpx.Response(200, headers={"x-ratelimit-remaining": "57"}), turn)
 
-    tools._remember_rate_limit("example.com", httpx.Response(200, headers={"x-ratelimit-remaining": "57"}))
-    assert "example.com" not in tools._next_request_at
+    # The next agent to take reddit.com's turn waits out the limit; example.com had requests left.
+    slept = []
+    monkeypatch.setattr(tools.time, "sleep", slept.append)
+    with tools._host_turn("www.reddit.com") as turn:
+        tools._wait_for("www.reddit.com", turn)
+    with tools._host_turn("example.com") as turn:
+        tools._wait_for("example.com", turn)
+    assert len(slept) == 1 and 29 < slept[0] <= 31

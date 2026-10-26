@@ -19,6 +19,7 @@ def test_writes_one_numbered_line_per_step(tmp_path):
     recorder.on_model_response(
         SimpleNamespace(
             stop_response=SimpleNamespace(stop_reason="tool_use", message={"role": "assistant", "content": []}),
+            retry=False,
             exception=None,
         )
     )

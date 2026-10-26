@@ -64,6 +64,7 @@ class TraceRecorder(HookProvider):
             ms=ms,
             stop_reason=event.stop_response.stop_reason,
             message=event.stop_response.message,
+            retried=event.retry,  # true when a hook discarded this reply and asked the model again
         )
 
     def on_tool_call(self, event: BeforeToolCallEvent) -> None:
