@@ -7,8 +7,8 @@ from strands import Agent
 from strands.models.ollama import OllamaModel
 from strands.vended_plugins.skills import AgentSkills
 
-from .empty_reply_retry import EmptyReplyRetry
 from .recorder import TraceRecorder
+from .reply_retry import ReplyRetry
 from .skill_redirect import SkillNameRedirect
 from .tools import current_time, fetch_url, read_feed, read_subreddit, write_report
 
@@ -29,6 +29,10 @@ def build_agent(recorder: TraceRecorder) -> Agent:
         host=os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
         model_id=os.environ.get("AGENT_MODEL", "gemma4:e2b"),
         temperature=0.2,
+        # A cap on each reply, thinking included. Normal replies stay under about 5,000 tokens; without
+        # a cap, gemma4:12b once looped on the same text for 60,000 tokens and 30 minutes. ReplyRetry
+        # asks again when a reply hits it.
+        max_tokens=8192,
         # Ollama's context window: prompt plus reply, in tokens. 32k fits a day of subreddit posts and
         # comments; on gemma4:e2b it barely changed memory use on a 16 GB Mac. Ollama only applies
         # this when it loads the model: if `ollama ps` shows a smaller CONTEXT, run `ollama stop <model>`.
@@ -42,6 +46,6 @@ def build_agent(recorder: TraceRecorder) -> Agent:
         tools=[current_time, fetch_url, read_feed, read_subreddit, write_report],
         system_prompt=SYSTEM_PROMPT,
         # Registered after the recorder, so it runs first after a model call and the trace shows its retries.
-        hooks=[recorder, SkillNameRedirect(skills), EmptyReplyRetry()],
+        hooks=[recorder, SkillNameRedirect(skills), ReplyRetry()],
         plugins=[skills],
     )
