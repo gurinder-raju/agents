@@ -14,5 +14,7 @@ def main() -> None:
 
     recorder = TraceRecorder(args.trace_dir)
     agent = build_agent(recorder)
-    agent(args.prompt)  # Strands' default callback handler streams the reply to the terminal
+    # Strands' default callback handler streams the reply to the terminal. invocation_state reaches
+    # tools that ask for a ToolContext: write_report names its file after the run.
+    agent(args.prompt, invocation_state={"run_id": recorder.run_id})
     print(f"\n\ntrace: {recorder.path}")

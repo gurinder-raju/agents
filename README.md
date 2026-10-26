@@ -22,4 +22,7 @@ uv run pytest
 
 Skills live in `skills/<name>/SKILL.md`; put your own in `jobs/skills/`, which git ignores.
 
+Ask for a report and the agent saves an HTML page of links, with your prompt and its criteria at the top,
+to `outputs/reports/<run_id>-<title>.html`. Like traces, reports are gitignored.
+
 Each run writes its steps to `traces/<run_id>.jsonl`. Set `AGENT_MODEL` to try another Ollama model, and `OLLAMA_HOST` if Ollama isn't on `localhost:11434`.

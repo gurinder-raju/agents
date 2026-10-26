@@ -9,7 +9,7 @@ from strands.vended_plugins.skills import AgentSkills
 
 from .recorder import TraceRecorder
 from .skill_redirect import SkillNameRedirect
-from .tools import current_time, fetch_url, read_feed, read_subreddit
+from .tools import current_time, fetch_url, read_feed, read_subreddit, write_report
 
 # Generic on purpose. Instructions for a specific job belong in job files under jobs/, which git ignores.
 SYSTEM_PROMPT = """You are a helpful assistant.
@@ -37,7 +37,7 @@ def build_agent(recorder: TraceRecorder) -> Agent:
     skills = AgentSkills(skills=[d for d in SKILL_DIRS if Path(d).is_dir()])
     return Agent(
         model=model,
-        tools=[current_time, fetch_url, read_feed, read_subreddit],
+        tools=[current_time, fetch_url, read_feed, read_subreddit, write_report],
         system_prompt=SYSTEM_PROMPT,
         hooks=[recorder, SkillNameRedirect(skills)],
         plugins=[skills],

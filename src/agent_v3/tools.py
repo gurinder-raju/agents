@@ -13,15 +13,19 @@ import socket
 import sys
 import threading
 import time
+import uuid
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
 from zoneinfo import ZoneInfo
 
 import httpx
-from strands import tool
+from strands import ToolContext, tool
+
+from .report import normalize_items, render_report, report_filename
 
 # About 3,000 tokens: enough for most articles, small enough for a local model's context window.
 MAX_PAGE_CHARS = 12_000
@@ -121,6 +125,46 @@ def read_subreddit(subreddit: str, since_hours: float = 24, max_posts: int = 25)
         posts.append({key: post[key] for key in ("title", "author", "published", "link", "text")} | {"comments": comments})
 
     return _fit_subreddit(name, posts, posts_not_read=len(recent) - len(to_read))
+
+
+# Reports are output, so they go under outputs/, which git ignores. Relative to where you run the agent.
+REPORT_DIR = Path("outputs/reports")
+
+
+@tool(context=True)
+def write_report(title: str, criteria: str, items: list[dict[str, Any]], tool_context: ToolContext) -> str:
+    """Save a list of links as an HTML report and return the file's path.
+
+    The report shows the user's prompt word for word, the criteria you applied, and one entry per
+    match. Call it once, at the end, with every match. Pass an empty list if nothing matched.
+
+    Args:
+        title: Short title for the report, for example "r/Python posts that mention uv".
+        criteria: In one or two sentences, what made a link count as a match.
+        items: One object per match: {"title": "...", "description": "...", "links": [{"label": "post",
+            "url": "https://..."}]}. The description says in a sentence or two why it matched. Give
+            one link, or several when they belong together, such as a post and the article it links to.
+    """
+    created = datetime.now().astimezone()
+    html = render_report(title, _user_prompt(tool_context.agent.messages), criteria, normalize_items(items), created)
+    # The CLI passes the trace's run id, so a report and its trace share a name. Several agents can run
+    # at once in one folder, so without one, a random suffix keeps their reports apart.
+    run_id = tool_context.invocation_state.get("run_id") or created.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
+    path = REPORT_DIR / report_filename(run_id, title)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(html)
+    _progress(f"write_report: saved {path}")
+    return str(path.resolve())
+
+
+def _user_prompt(messages: list[dict[str, Any]]) -> str:
+    """The text of the first user message: the prompt this run was started with."""
+    for message in messages:
+        if message["role"] == "user":
+            texts = [block["text"] for block in message["content"] if "text" in block]
+            if texts:
+                return "\n".join(texts)
+    return ""
 
 
 def _fit_subreddit(name: str, posts: list[dict[str, Any]], posts_not_read: int) -> str:
