@@ -8,11 +8,13 @@ from strands.models.ollama import OllamaModel
 from strands.vended_plugins.skills import AgentSkills
 
 from .recorder import TraceRecorder
-from .tools import current_time, fetch_url
+from .tools import current_time, fetch_url, read_feed
 
 # Generic on purpose. Instructions for a specific job belong in job files under jobs/, which git ignores.
 SYSTEM_PROMPT = """You are a helpful assistant.
-Use your tools when they help you answer. If you can't do something, say so plainly."""
+Use your tools when they help you answer. If you can't do something, say so plainly.
+Skills listed under available_skills are not tools. To use one, call the `skills` tool with its name,
+then follow the instructions it returns."""
 
 # Each skill is a folder with a SKILL.md. skills/ holds generic ones and is committed;
 # jobs/skills/ is for your own, and git ignores it. Paths are relative to where you run the agent.
@@ -30,7 +32,7 @@ def build_agent(recorder: TraceRecorder) -> Agent:
     )
     return Agent(
         model=model,
-        tools=[current_time, fetch_url],
+        tools=[current_time, fetch_url, read_feed],
         system_prompt=SYSTEM_PROMPT,
         hooks=[recorder],
         # The plugin lists each skill's name and description in the system prompt, and adds a

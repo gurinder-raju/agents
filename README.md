@@ -14,7 +14,7 @@ Needs [uv](https://docs.astral.sh/uv/) and [Ollama](https://ollama.com/download)
 ```bash
 ollama pull gemma4:e2b
 uv run hello-agent "What time is it in Tokyo?"
-uv run hello-agent "Summarize https://example.com"
+uv run hello-agent "Go through the new posts in r/Python. For each one, tell me which Python libraries the post or its comments mention."
 uv run pytest
 ```
 
