@@ -337,7 +337,7 @@ def _find_missing_links(items: list[dict[str, Any]], client: httpx.Client | None
     client = client or httpx.Client(
         follow_redirects=True,
         timeout=10,
-        headers={"User-Agent": "agent-v3/0.1"},
+        headers={"User-Agent": "fetcher/0.1"},
         event_hooks={"request": [refuse_non_public_host]},
     )
     with client:
@@ -456,7 +456,7 @@ def _iso(value: Any) -> str:
 # When each host lets us call again, from the rate-limit headers it sent back. It's kept in a small
 # file per host, locked while a request is in flight, so agents running at once on this machine take
 # turns instead of using up each other's budget. Reddit allows one request a minute without logging in.
-RATE_LIMIT_DIR = Path(tempfile.gettempdir()) / "agent-v3-rate-limits"
+RATE_LIMIT_DIR = Path(tempfile.gettempdir()) / "fetcher-rate-limits"
 MAX_RATE_LIMIT_WAIT_S = 120
 MAX_ATTEMPTS = 3
 
@@ -472,7 +472,7 @@ def http_get(url: str) -> httpx.Response:
     with httpx.Client(
         follow_redirects=True,
         timeout=20,
-        headers={"User-Agent": "agent-v3/0.1"},
+        headers={"User-Agent": "fetcher/0.1"},
         event_hooks={"request": [refuse_non_public_host]},
     ) as client, _host_turn(host) as turn:
         for _ in range(MAX_ATTEMPTS):

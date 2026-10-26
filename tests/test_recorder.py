@@ -1,7 +1,7 @@
 import json
 from types import SimpleNamespace
 
-from agent_v3.recorder import TraceRecorder
+from fetcher.recorder import TraceRecorder
 
 # Stand-ins for the Strands hook events: the recorder only reads these attributes.
 TOOL_USE = {"name": "current_time", "toolUseId": "tooluse_1", "input": {"timezone": "UTC"}}

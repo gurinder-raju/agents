@@ -5,8 +5,8 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 
-from agent_v3 import tools
-from agent_v3.tools import parse_feed, read_feed
+from fetcher import tools
+from fetcher.tools import parse_feed, read_feed
 
 NOW = datetime.now(UTC)
 RECENT = (NOW - timedelta(hours=2)).isoformat()

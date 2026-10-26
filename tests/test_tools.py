@@ -2,7 +2,7 @@ from datetime import datetime
 
 import pytest
 
-from agent_v3.tools import current_time, fetch_url, find_links, html_to_text
+from fetcher.tools import current_time, fetch_url, find_links, html_to_text
 
 
 def test_current_time_returns_iso_timestamp_in_the_given_zone():

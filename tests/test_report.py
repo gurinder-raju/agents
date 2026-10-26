@@ -4,9 +4,9 @@ import httpx
 import pytest
 from strands.agent.state import AgentState
 
-from agent_v3 import tools
-from agent_v3.report import canonical_link, normalize_items
-from agent_v3.tools import write_report
+from fetcher import tools
+from fetcher.report import canonical_link, normalize_items
+from fetcher.tools import write_report
 
 POST = "https://www.reddit.com/r/Python/comments/1abc23/switched_to_uv/"
 QUIET = "https://www.reddit.com/r/Python/comments/9zz/quiet_post/"

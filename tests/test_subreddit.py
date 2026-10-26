@@ -6,8 +6,8 @@ import httpx
 import pytest
 from strands.agent.state import AgentState
 
-from agent_v3 import tools
-from agent_v3.tools import read_subreddit
+from fetcher import tools
+from fetcher.tools import read_subreddit
 from test_feeds import ATOM, NOW, OLD, RECENT
 
 POST_LINK = "https://www.reddit.com/r/learnpython/comments/1abc23/question_about_virtual_environments/"

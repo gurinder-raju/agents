@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from agent_v3.reply_retry import MAX_RETRIES, ReplyRetry
+from fetcher.reply_retry import MAX_RETRIES, ReplyRetry
 
 
 def reply(*content, stop_reason="end_turn"):

@@ -1,5 +1,5 @@
 [project]
-name = "agent-v3"
+name = "fetcher"
 version = "0.1.0"
 description = "An experimental, portable agent design: one agent that runs locally on Ollama or in the cloud on AWS Bedrock and AgentCore."
 requires-python = ">=3.12"
@@ -9,7 +9,7 @@ dependencies = [
 ]
 
 [project.scripts]
-agent-v3 = "agent_v3.cli:main"
+fetcher = "fetcher.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]

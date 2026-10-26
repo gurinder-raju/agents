@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 from strands.vended_plugins.skills import AgentSkills, Skill
 
-from agent_v3.skill_redirect import SkillNameRedirect
+from fetcher.skill_redirect import SkillNameRedirect
 
 SKILLS = AgentSkills(skills=[Skill(name="reddit-new-posts", description="Read new posts.", instructions="Steps.")])
 

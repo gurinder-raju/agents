@@ -1,8 +1,10 @@
 """The agent: which model it calls, which tools it has, and how it is told to behave."""
 
 import os
+import sys
 from pathlib import Path
 
+import ollama
 from strands import Agent
 from strands.models.ollama import OllamaModel
 from strands.vended_plugins.skills import AgentSkills
@@ -51,3 +53,15 @@ def build_agent(recorder: TraceRecorder) -> Agent:
         hooks=[recorder, SkillNameRedirect(skills), ReplyRetry()],
         plugins=[skills],
     )
+
+
+def unload_model(agent: Agent) -> None:
+    """Ask Ollama to drop the model from memory now, instead of after its default 5 idle minutes.
+
+    gemma4:e4b holds about 11 GB while it's loaded, most of a 16 GB Mac. This is what `ollama stop` does.
+    """
+    model = agent.model
+    try:
+        ollama.Client(model.host, **model.client_args).generate(model=model.config["model_id"], keep_alive=0)
+    except Exception as error:  # Ollama isn't running, or the model is already gone: nothing to free
+        print(f"could not unload {model.config['model_id']}: {error}", file=sys.stderr)
