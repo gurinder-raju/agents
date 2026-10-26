@@ -1,0 +1,473 @@
+<title>Agent Stack Map</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..100,500..800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one wide column; each diagram is an SVG drawn at 1160 units that scrolls sideways inside its own frame on narrow screens. */
+:root {
+  --bg: #f4f6f9;
+  --surface: #ffffff;
+  --ink: #18202b;
+  --muted: #566273;
+  --line: #c9d1dc;
+  --aws: #3d4fb8;
+  --aws-tint: #eceffc;
+  --gcp: #0e7a6b;
+  --gcp-tint: #e3f4f1;
+  --font-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f141b; --surface: #161d27; --ink: #e6ebf2; --muted: #9aa7b8; --line: #34404f;
+    --aws: #9aa8f5; --aws-tint: #1d2340; --gcp: #5fd0bd; --gcp-tint: #12302c; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f141b; --surface: #161d27; --ink: #e6ebf2; --muted: #9aa7b8; --line: #34404f;
+  --aws: #9aa8f5; --aws-tint: #1d2340; --gcp: #5fd0bd; --gcp-tint: #12302c; color-scheme: dark;
+}
+body { background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 15px; line-height: 1.55; }
+.wrap { max-width: 1200px; margin: 0 auto; padding-block: 40px 72px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 48px; }
+h1, h2 { font-family: var(--font-display); font-stretch: 85%; text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(30px, 5vw, 44px); font-weight: 800; letter-spacing: -0.01em; }
+h2 { font-size: 22px; font-weight: 700; }
+p { margin: 0; max-width: 70ch; }
+header, section { display: grid; gap: 14px; min-width: 0; }
+.eyebrow, .meta { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.06em; color: var(--muted); }
+.eyebrow { text-transform: uppercase; }
+.lede { font-size: 17px; color: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 20px; font-size: 13px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 7px; }
+.sw { width: 16px; height: 12px; border-radius: 3px; display: inline-block; font-style: normal; }
+.sw.managed { background: var(--line); }
+.sw.oss { border: 1.5px dashed var(--muted); }
+.sw.ln { width: 22px; height: 0; border-radius: 0; border-top: 1.5px solid var(--muted); }
+.sw.egress { border-top-style: dashed; border-top-color: var(--gcp); }
+.sw.side { border-top-style: dotted; border-top-width: 2px; }
+.sw.code { width: auto; height: auto; border-radius: 0; font-family: var(--font-mono); font-size: 11.5px; color: var(--aws); }
+.sw.code.sdk { color: var(--ink); }
+.frame { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+.frame svg { display: block; width: 100%; min-width: 980px; height: auto; }
+.notes { margin: 0; padding-left: 18px; display: grid; gap: 6px; max-width: 82ch; font-size: 14.5px; }
+
+/* svg */
+.hd { font-family: var(--font-display); font-weight: 700; font-size: 18px; }
+.hd.aws { fill: var(--aws); }
+.hd.gcp { fill: var(--gcp); }
+.lbl { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; fill: var(--muted); }
+.tt { font-family: var(--font-body); font-weight: 600; font-size: 14px; fill: var(--ink); }
+.ts { font-family: var(--font-body); font-size: 12px; fill: var(--muted); }
+.api { font-family: var(--font-mono); font-size: 11px; fill: var(--aws); }
+.sdk { font-family: var(--font-mono); font-size: 11px; fill: var(--ink); }
+.svc { font-family: var(--font-mono); font-size: 10.5px; fill: var(--muted); }
+.tag { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; }
+.tag.aws { fill: var(--aws); }
+.tag.gcp { fill: var(--gcp); }
+.b { stroke-width: 1; }
+.b.n { fill: var(--surface); stroke: var(--line); }
+.b.aws { fill: var(--aws-tint); stroke: var(--aws); stroke-opacity: 0.55; }
+.b.gcp { fill: var(--gcp-tint); stroke: var(--gcp); stroke-opacity: 0.55; }
+.b.oss { fill: var(--surface); stroke-dasharray: 5 4; stroke-opacity: 1; }
+.b.ctr { fill: none; stroke-dasharray: 2 4; }
+.ar { stroke: var(--muted); stroke-width: 1.3; fill: none; }
+.ar.eg { stroke: var(--gcp); stroke-dasharray: 5 4; }
+.ar.side { stroke-dasharray: 2 3; stroke-width: 1.5; }
+.rule { stroke: var(--line); stroke-width: 1; }
+</style>
+
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">Working notes · build an agent end to end</div>
+  <h1>Agent stack map</h1>
+  <p class="lede">How one request moves through an agent. First AWS and Google side by side, then a closer look at the AWS version with the APIs each piece exposes.</p>
+  <div class="meta">Revision 5 · 24 Oct 2026</div>
+</header>
+
+<section id="compare">
+  <h2>One request, AWS and Google side by side</h2>
+  <div class="legend">
+    <span><i class="sw managed"></i>Managed service</span>
+    <span><i class="sw oss"></i>Open source or your code</span>
+    <span><i class="sw ln egress"></i>Sandbox network traffic</span>
+  </div>
+  <div class="frame">
+<svg viewBox="0 0 1160 716" role="img" aria-labelledby="f1t f1d">
+<title id="f1t">Request flow on AWS and Google Cloud</title>
+<desc id="f1d">A caller hits a front door, a control plane places the session, a runtime hosts the agent and harness, and the harness calls out to the inference service, a code sandbox and a tool gateway, which lead to the model and to tools. AWS uses AgentCore Runtime, Strands, Bedrock, Claude, Code Interpreter and AgentCore Gateway. Google uses Agent Gateway, Agent Executor on Agent Substrate or the Agent Compute Engine scheduler, Agent Runtime, ADK, Agent Platform Models, Agent Sandbox and Agent Gateway.</desc>
+<defs><marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+
+<text class="hd aws" x="405" y="30" text-anchor="middle">AWS</text>
+<text class="hd gcp" x="905" y="30" text-anchor="middle">Google Cloud</text>
+<line class="rule" x1="655" y1="50" x2="655" y2="700"/>
+
+<text class="lbl" x="16" y="90">Caller</text>
+<text class="lbl" x="16" y="174">Front door</text>
+<text class="lbl" x="16" y="270">Control plane</text>
+<text class="lbl" x="16" y="404">Runtime</text>
+<text class="lbl" x="16" y="420">+ harness</text>
+<text class="lbl" x="16" y="550">Calls out</text>
+<text class="lbl" x="16" y="660">Backends</text>
+
+<rect class="b n" x="255" y="60" width="300" height="52" rx="8"/>
+<text class="tt" x="405" y="82" text-anchor="middle">Caller</text>
+<text class="ts" x="405" y="100" text-anchor="middle">your app, CLI or bot, with a session id</text>
+<line class="ar" x1="405" y1="114" x2="405" y2="138" marker-end="url(#ah)"/>
+
+<rect class="b aws" x="235" y="140" width="340" height="60" rx="8"/>
+<text class="tt" x="405" y="164" text-anchor="middle">AgentCore Runtime endpoint</text>
+<text class="ts" x="405" y="184" text-anchor="middle">AgentCore Identity checks who is calling</text>
+<line class="ar" x1="405" y1="202" x2="405" y2="228" marker-end="url(#ah)"/>
+
+<rect class="b aws" x="235" y="230" width="340" height="72" rx="8"/>
+<text class="tt" x="405" y="256" text-anchor="middle">AgentCore Runtime control plane</text>
+<text class="ts" x="405" y="276" text-anchor="middle">maps the session to its microVM</text>
+<text class="ts" x="405" y="292" text-anchor="middle">starts one if needed, scales idle ones to zero</text>
+<line class="ar" x1="405" y1="304" x2="405" y2="330" marker-end="url(#ah)"/>
+
+<rect class="b aws ctr" x="170" y="332" width="470" height="140" rx="12"/>
+<text class="tag aws" x="190" y="354">AgentCore Runtime · one microVM per session</text>
+<rect class="b aws oss" x="190" y="370" width="430" height="76" rx="8"/>
+<text class="tt" x="405" y="392" text-anchor="middle">Agent + harness (the brain)</text>
+<text class="ts" x="405" y="412" text-anchor="middle">Strands Harness SDK · Strands Harness · or AgentCore Harness (managed)</text>
+<text class="ts" x="405" y="430" text-anchor="middle">loop: call the model, run a tool, feed the result back, repeat</text>
+
+<line class="ar" x1="245" y1="448" x2="245" y2="508" marker-end="url(#ah)"/>
+<line class="ar" x1="405" y1="448" x2="405" y2="508" marker-end="url(#ah)"/>
+<line class="ar" x1="565" y1="448" x2="565" y2="508" marker-end="url(#ah)"/>
+
+<rect class="b aws" x="170" y="510" width="150" height="72" rx="8"/>
+<text class="tt" x="245" y="532" text-anchor="middle">Amazon Bedrock</text>
+<text class="ts" x="245" y="552" text-anchor="middle">inference service</text>
+<text class="ts" x="245" y="568" text-anchor="middle">auth, quotas, caching</text>
+
+<rect class="b aws" x="330" y="510" width="150" height="72" rx="8"/>
+<text class="tt" x="405" y="532" text-anchor="middle">Code Interpreter</text>
+<text class="ts" x="405" y="552" text-anchor="middle">AgentCore, + Browser</text>
+<text class="ts" x="405" y="568" text-anchor="middle">sandbox (the hands)</text>
+
+<rect class="b aws" x="490" y="510" width="150" height="72" rx="8"/>
+<text class="tt" x="565" y="532" text-anchor="middle">AgentCore Gateway</text>
+<text class="ts" x="565" y="552" text-anchor="middle">tools as MCP</text>
+<text class="ts" x="565" y="568" text-anchor="middle">creds via Identity</text>
+
+<line class="ar" x1="245" y1="584" x2="245" y2="618" marker-end="url(#ah)"/>
+<line class="ar" x1="565" y1="584" x2="565" y2="618" marker-end="url(#ah)"/>
+
+<rect class="b aws" x="170" y="620" width="150" height="72" rx="8"/>
+<text class="tt" x="245" y="642" text-anchor="middle">Claude</text>
+<text class="ts" x="245" y="662" text-anchor="middle">Opus 5.5 · Sonnet 5.5</text>
+<text class="ts" x="245" y="678" text-anchor="middle">stateless model</text>
+
+<rect class="b aws oss" x="490" y="620" width="150" height="72" rx="8"/>
+<text class="tt" x="565" y="642" text-anchor="middle">Lambda · OpenAPI</text>
+<text class="ts" x="565" y="662" text-anchor="middle">MCP servers</text>
+<text class="ts" x="565" y="678" text-anchor="middle">your systems</text>
+
+<rect class="b n" x="755" y="60" width="300" height="52" rx="8"/>
+<text class="tt" x="905" y="82" text-anchor="middle">Caller</text>
+<text class="ts" x="905" y="100" text-anchor="middle">your app, CLI or bot, with a session id</text>
+<line class="ar" x1="905" y1="114" x2="905" y2="138" marker-end="url(#ah)"/>
+
+<rect class="b gcp" x="735" y="140" width="340" height="60" rx="8"/>
+<text class="tt" x="905" y="164" text-anchor="middle">Agent Gateway</text>
+<text class="ts" x="905" y="184" text-anchor="middle">client-to-agent traffic, policy, Agent Identity</text>
+<line class="ar" x1="905" y1="202" x2="905" y2="228" marker-end="url(#ah)"/>
+
+<rect class="b gcp" x="735" y="230" width="340" height="72" rx="8"/>
+<text class="tt" x="905" y="256" text-anchor="middle">Agent Executor + Agent Substrate</text>
+<text class="ts" x="905" y="276" text-anchor="middle">AX: tasks, workspaces, suspend and resume</text>
+<text class="ts" x="905" y="292" text-anchor="middle">Substrate places them on workers · or managed ACE</text>
+<line class="ar" x1="905" y1="304" x2="905" y2="330" marker-end="url(#ah)"/>
+
+<rect class="b gcp ctr" x="670" y="332" width="470" height="140" rx="12"/>
+<text class="tag gcp" x="690" y="354">Agent Runtime, Cloud Run or GKE</text>
+<rect class="b gcp oss" x="690" y="370" width="430" height="76" rx="8"/>
+<text class="tt" x="905" y="392" text-anchor="middle">Agent + harness (the brain)</text>
+<text class="ts" x="905" y="412" text-anchor="middle">ADK agent + Runner, or any harness you bring</text>
+<text class="ts" x="905" y="430" text-anchor="middle">loop: call the model, run a tool, feed the result back, repeat</text>
+
+<line class="ar" x1="745" y1="448" x2="745" y2="508" marker-end="url(#ah)"/>
+<line class="ar" x1="905" y1="448" x2="905" y2="508" marker-end="url(#ah)"/>
+<line class="ar" x1="1065" y1="448" x2="1065" y2="508" marker-end="url(#ah)"/>
+
+<rect class="b gcp" x="670" y="510" width="150" height="72" rx="8"/>
+<text class="tt" x="745" y="532" text-anchor="middle">Agent Platform</text>
+<text class="ts" x="745" y="552" text-anchor="middle">Models (Vertex AI)</text>
+<text class="ts" x="745" y="568" text-anchor="middle">auth, quotas, caching</text>
+
+<rect class="b gcp" x="830" y="510" width="150" height="72" rx="8"/>
+<text class="tt" x="905" y="532" text-anchor="middle">Agent Sandbox</text>
+<text class="ts" x="905" y="552" text-anchor="middle">GKE: gVisor or Kata</text>
+<text class="ts" x="905" y="568" text-anchor="middle">managed: ACE microVM</text>
+
+<rect class="b gcp" x="990" y="510" width="150" height="72" rx="8"/>
+<text class="tt" x="1065" y="532" text-anchor="middle">Agent Gateway</text>
+<text class="ts" x="1065" y="552" text-anchor="middle">egress + DLP policy</text>
+<text class="ts" x="1065" y="568" text-anchor="middle">swaps in credentials</text>
+
+<path class="ar eg" d="M905 584 L905 600 L1030 600 L1030 586" marker-end="url(#ah)"/>
+<line class="ar" x1="745" y1="584" x2="745" y2="618" marker-end="url(#ah)"/>
+<line class="ar" x1="1065" y1="584" x2="1065" y2="618" marker-end="url(#ah)"/>
+
+<rect class="b gcp" x="670" y="620" width="150" height="72" rx="8"/>
+<text class="tt" x="745" y="642" text-anchor="middle">Gemini or Claude</text>
+<text class="ts" x="745" y="662" text-anchor="middle">on Google's platform</text>
+<text class="ts" x="745" y="678" text-anchor="middle">stateless model</text>
+
+<rect class="b gcp oss" x="990" y="620" width="150" height="72" rx="8"/>
+<text class="tt" x="1065" y="642" text-anchor="middle">Cloud Run · MCP</text>
+<text class="ts" x="1065" y="662" text-anchor="middle">OpenAPI, your systems</text>
+<text class="ts" x="1065" y="678" text-anchor="middle">in Agent Registry</text>
+</svg>
+  </div>
+  <ul class="notes">
+    <li>The harness is the brain. It runs in the runtime and calls the model. Code and browsing run in a separate sandbox, the hands.</li>
+    <li>On Google, the sandbox holds no credentials. Its traffic leaves through Agent Gateway, which checks identity and adds the credential on the way out.</li>
+    <li>Your agent and harness code moves between clouds. The front door, control plane, runtime and gateway are each cloud's own.</li>
+  </ul>
+</section>
+
+<section id="aws">
+  <h2>The AWS version, up close</h2>
+  <p>The request runs straight down the middle. The blocks on either side are used alongside it: set up once at deploy time, asked for credentials, or optional.</p>
+  <div class="legend">
+    <span><i class="sw managed"></i>Managed service</span>
+    <span><i class="sw oss"></i>Your code</span>
+    <span>API name styles are explained in the top-left corner of the diagram</span>
+  </div>
+  <div class="frame">
+<svg viewBox="0 0 1160 960" role="img" aria-labelledby="f2t f2d">
+<title id="f2t">AWS agent request flow with APIs</title>
+<desc id="f2d">A caller calls AgentCore Runtime with InvokeAgentRuntime. Runtime starts your container in a microVM, where the bedrock-agentcore SDK serves /invocations and hands the request to a Strands agent and harness. The harness calls Amazon Bedrock with ConverseStream to reach Claude, AgentCore Code Interpreter and Browser for sandboxed code, and AgentCore Gateway over MCP to reach your tools. Alongside: AgentCore Identity for inbound and outbound auth, AgentCore Observability for traces, AgentCore Harness as a managed alternative to your container, the control plane APIs used at deploy time, AgentCore Memory as optional storage, and the Bedrock session store as an alternative checkpoint store.</desc>
+<defs><marker id="ah2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+
+<text class="api" x="20" y="38">ConverseStream</text>
+<text class="ts" x="146" y="38">API this box offers, over the network</text>
+<text class="sdk" x="20" y="58">take_snapshot()</text>
+<text class="ts" x="146" y="58">SDK method this box offers, in-process</text>
+<text class="svc" x="20" y="78">bedrock-agentcore</text>
+<text class="ts" x="146" y="78">AWS service that offers those APIs</text>
+<line class="ar" x1="20" y1="96" x2="128" y2="96" marker-end="url(#ah2)"/>
+<text class="ts" x="146" y="100">a call; its label names the API used</text>
+<line class="ar side" x1="20" y1="118" x2="128" y2="118"/>
+<text class="ts" x="146" y="122">used alongside the request</text>
+
+<rect class="b n" x="455" y="40" width="250" height="60" rx="8"/>
+<text class="tt" x="580" y="64" text-anchor="middle">Caller</text>
+<text class="ts" x="580" y="84" text-anchor="middle">your app, CLI or bot</text>
+<line class="ar" x1="580" y1="102" x2="580" y2="138" marker-end="url(#ah2)"/>
+<text class="api" x="590" y="124">InvokeAgentRuntime</text>
+
+<rect class="b aws" x="330" y="140" width="500" height="110" rx="8"/>
+<text class="tag aws" x="350" y="162">Request time · data plane</text>
+<text class="svc" x="810" y="162" text-anchor="end">bedrock-agentcore</text>
+<text class="tt" x="350" y="186">AgentCore Runtime</text>
+<text class="ts" x="350" y="206">serverless host: one microVM per session, idle ones scale to zero</text>
+<text class="api" x="350" y="232">InvokeAgentRuntime(runtimeSessionId) · StopRuntimeSession</text>
+<line class="ar" x1="580" y1="252" x2="580" y2="278" marker-end="url(#ah2)"/>
+<text class="api" x="590" y="270">POST /invocations</text>
+
+<rect class="b aws ctr" x="330" y="280" width="500" height="250" rx="12"/>
+<text class="tag aws" x="350" y="302">Your container, inside the microVM</text>
+<text x="350" y="320"><tspan class="ts">your code serves </tspan><tspan class="api">POST /invocations · GET /ping</tspan><tspan class="ts"> on port 8080</tspan></text>
+
+<rect class="b aws oss" x="350" y="334" width="460" height="54" rx="8"/>
+<text class="tt" x="366" y="354">Runtime glue · bedrock-agentcore SDK</text>
+<text class="sdk" x="366" y="374">BedrockAgentCoreApp() · @app.entrypoint · app.run()</text>
+
+<rect class="b aws oss" x="350" y="400" width="460" height="114" rx="8"/>
+<text class="tt" x="366" y="420">Agent + harness · Strands Harness SDK</text>
+<text class="ts" x="366" y="440">loop: call the model, run a tool, feed the result back, repeat</text>
+<text class="sdk" x="366" y="460">Agent(model, tools, system_prompt) · @tool</text>
+<text class="sdk" x="366" y="478">agent(prompt) · invoke_async() · stream_async()</text>
+<text class="sdk" x="366" y="496">take_snapshot() · load_snapshot() · hooks</text>
+
+<line class="ar" x1="580" y1="516" x2="580" y2="678" marker-end="url(#ah2)"/>
+<path class="ar" d="M450 516 L450 640 L200 640 L200 678" marker-end="url(#ah2)"/>
+<path class="ar" d="M710 516 L710 640 L960 640 L960 678" marker-end="url(#ah2)"/>
+<text class="api" x="210" y="660">ConverseStream</text>
+<text class="api" x="590" y="660">InvokeCodeInterpreter</text>
+<text class="api" x="850" y="660">MCP tools/call</text>
+
+<rect class="b aws" x="20" y="680" width="360" height="140" rx="8"/>
+<text class="tag aws" x="40" y="702">Managed · inference</text>
+<text class="svc" x="360" y="702" text-anchor="end">bedrock-runtime</text>
+<text class="tt" x="40" y="724">Amazon Bedrock</text>
+<text class="ts" x="40" y="744">auth, quotas, caching · keeps no context</text>
+<text class="api" x="40" y="768">Converse · ConverseStream</text>
+<text class="api" x="40" y="786">InvokeModel · InvokeModelWithResponseStream</text>
+<text class="ts" x="40" y="806">Strands calls ConverseStream</text>
+
+<rect class="b aws" x="400" y="680" width="360" height="140" rx="8"/>
+<text class="tag aws" x="420" y="702">Managed · sandboxes</text>
+<text class="svc" x="740" y="702" text-anchor="end">bedrock-agentcore</text>
+<text class="tt" x="420" y="724">AgentCore Code Interpreter + Browser</text>
+<text class="ts" x="420" y="744">where generated code runs: the hands</text>
+<text class="api" x="420" y="768">StartCodeInterpreterSession</text>
+<text class="api" x="420" y="786">InvokeCodeInterpreter</text>
+<text class="api" x="420" y="804">StartBrowserSession · InvokeBrowser</text>
+
+<rect class="b aws" x="780" y="680" width="360" height="140" rx="8"/>
+<text class="tag aws" x="800" y="702">Managed · tools</text>
+<text class="tt" x="800" y="724">AgentCore Gateway</text>
+<text class="ts" x="800" y="744">one MCP endpoint in front of your tools</text>
+<text class="api" x="800" y="768">MCP: tools/list · tools/call</text>
+<text class="ts" x="800" y="788">built-in semantic tool search</text>
+<text class="ts" x="800" y="806">credentials come from Identity</text>
+
+<line class="ar" x1="200" y1="822" x2="200" y2="858" marker-end="url(#ah2)"/>
+<text class="ts" x="210" y="844">internal to AWS, no public API</text>
+<line class="ar" x1="960" y1="822" x2="960" y2="858" marker-end="url(#ah2)"/>
+<text class="api" x="970" y="844">Lambda Invoke · HTTPS · MCP</text>
+
+<rect class="b aws" x="20" y="860" width="360" height="76" rx="8"/>
+<text class="tt" x="40" y="884">Claude</text>
+<text class="ts" x="40" y="904">Opus 5.5 · Sonnet 5.5 · Fable 5.1 · stateless</text>
+<text class="ts" x="40" y="924">model id, e.g. global.anthropic.claude-opus-5</text>
+
+<rect class="b aws oss" x="780" y="860" width="360" height="76" rx="8"/>
+<text class="tt" x="800" y="884">Your tools</text>
+<text class="ts" x="800" y="904">Lambda functions · OpenAPI services · MCP servers</text>
+<text class="ts" x="800" y="924">called by Gateway, not by the agent directly</text>
+
+<rect class="b aws" x="20" y="140" width="280" height="150" rx="8"/>
+<text class="tag aws" x="36" y="162">Managed · auth</text>
+<text class="svc" x="284" y="162" text-anchor="end">bedrock-agentcore</text>
+<text class="tt" x="36" y="184">AgentCore Identity</text>
+<text class="ts" x="36" y="204">inbound: checks who calls the runtime</text>
+<text class="ts" x="36" y="222">outbound: hands tools their credentials</text>
+<text class="api" x="36" y="244">GetWorkloadAccessToken</text>
+<text class="api" x="36" y="262">GetResourceOauth2Token</text>
+<text class="api" x="36" y="280">GetResourceApiKey</text>
+<line class="ar side" x1="302" y1="195" x2="328" y2="195" marker-end="url(#ah2)"/>
+
+<rect class="b aws" x="20" y="310" width="280" height="110" rx="8"/>
+<text class="tag aws" x="36" y="332">Managed · traces</text>
+<text class="tt" x="36" y="354">AgentCore Observability</text>
+<text class="ts" x="36" y="374">OpenTelemetry spans from Strands</text>
+<text class="ts" x="36" y="392">land in CloudWatch, no calls in your code</text>
+<line class="ar side" x1="328" y1="365" x2="302" y2="365" marker-end="url(#ah2)"/>
+
+<rect class="b aws" x="20" y="440" width="280" height="100" rx="8"/>
+<text class="tag aws" x="36" y="462">Managed alternative</text>
+<text class="tt" x="36" y="484">AgentCore Harness</text>
+<text class="ts" x="36" y="504">same Strands loop as config, no container</text>
+<text class="api" x="36" y="526">CreateHarness · InvokeHarness</text>
+<line class="ar side" x1="302" y1="490" x2="328" y2="490"/>
+
+<rect class="b aws" x="860" y="140" width="280" height="150" rx="8"/>
+<text class="tag aws" x="876" y="162">Deploy time</text>
+<text class="svc" x="1124" y="162" text-anchor="end">bedrock-agentcore-control</text>
+<text class="tt" x="876" y="184">AgentCore control plane</text>
+<text class="ts" x="876" y="204">run once to set things up, not per request</text>
+<text class="api" x="876" y="226">CreateAgentRuntime</text>
+<text class="api" x="876" y="244">CreateAgentRuntimeEndpoint</text>
+<text class="api" x="876" y="262">CreateGateway · CreateGatewayTarget</text>
+<text class="api" x="876" y="280">CreateMemory</text>
+<line class="ar side" x1="858" y1="195" x2="832" y2="195" marker-end="url(#ah2)"/>
+
+<rect class="b aws" x="860" y="310" width="280" height="160" rx="8"/>
+<text class="tag aws" x="876" y="332">Optional</text>
+<text class="svc" x="1124" y="332" text-anchor="end">bedrock-agentcore</text>
+<text class="tt" x="876" y="354">AgentCore Memory</text>
+<text class="ts" x="876" y="374">saves turns, extracts long-term facts</text>
+<text class="api" x="876" y="398">CreateEvent · ListEvents</text>
+<text class="api" x="876" y="416">RetrieveMemoryRecords</text>
+<text class="sdk" x="876" y="440">AgentCoreMemorySessionManager</text>
+<text class="ts" x="876" y="458">plugs into the Strands agent</text>
+<line class="ar side" x1="812" y1="456" x2="858" y2="456" marker-end="url(#ah2)"/>
+
+<rect class="b aws" x="860" y="490" width="280" height="120" rx="8"/>
+<text class="tag aws" x="876" y="512">Alternative</text>
+<text class="svc" x="1124" y="512" text-anchor="end">bedrock-agent-runtime</text>
+<text class="tt" x="876" y="534">Bedrock session store</text>
+<text class="api" x="876" y="556">CreateSession · CreateInvocation</text>
+<text class="api" x="876" y="574">PutInvocationStep · GetInvocationStep</text>
+<text class="ts" x="876" y="596">instead of AgentCore Memory · preview</text>
+<line class="ar side" x1="812" y1="505" x2="858" y2="505" marker-end="url(#ah2)"/>
+</svg>
+  </div>
+</section>
+
+<section id="compute">
+  <h2>Google's agent compute layer, and the AWS parallel</h2>
+  <p>Agent Compute Engine (announced 22 Oct 2026) is the managed version of what Google already runs Gemini's agents on. The self-hosted version is three open-source layers on your own Kubernetes cluster: Agent Executor (AX) orchestrates agent tasks, Agent Substrate places them on machines, and GKE Agent Sandbox isolates each one.</p>
+  <div class="frame">
+<svg viewBox="0 0 1160 530" role="img" aria-labelledby="f3t f3d">
+<title id="f3t">Google agent compute layer compared with AWS</title>
+<desc id="f3d">The harness sends work down to either Agent Compute Engine, the managed option, or a self-hosted stack of Agent Executor on Agent Substrate on GKE Agent Sandbox on Kubernetes. Both send traffic out through Agent Gateway. On AWS the parallel is the Strands harness inside AgentCore Runtime, Code Interpreter and Browser sandboxes, and AgentCore Gateway with Identity.</desc>
+<defs><marker id="ah3" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+
+<text class="hd gcp" x="390" y="24" text-anchor="middle">Google Cloud</text>
+<text class="hd aws" x="970" y="24" text-anchor="middle">AWS parallel</text>
+<line class="rule" x1="780" y1="40" x2="780" y2="516"/>
+
+<rect class="b gcp oss" x="20" y="40" width="740" height="56" rx="8"/>
+<text class="tt" x="390" y="62" text-anchor="middle">Agent harness (the brain)</text>
+<text class="ts" x="390" y="82" text-anchor="middle">on ACE it runs outside the sandbox · on AX it runs inside the task's sandbox</text>
+
+<line class="ar" x1="200" y1="98" x2="200" y2="138" marker-end="url(#ah3)"/>
+<line class="ar" x1="580" y1="98" x2="580" y2="138" marker-end="url(#ah3)"/>
+
+<rect class="b gcp" x="20" y="140" width="360" height="269" rx="8"/>
+<text class="tag gcp" x="40" y="164">Managed · preview in coming months</text>
+<text class="tt" x="40" y="188">Agent Compute Engine (ACE)</text>
+<text class="ts" x="40" y="212">microVM per agent session (Cloud Hypervisor)</text>
+<text class="ts" x="40" y="232">checkpoints idle agents, snapshot and fork</text>
+<text class="ts" x="40" y="252">no credentials inside the VM</text>
+<text class="ts" x="40" y="272">own Hyperdisk for each workspace</text>
+<text class="ts" x="40" y="292">global scheduler places sessions</text>
+<text class="ts" x="40" y="312">already runs Gemini for work and Antigravity</text>
+
+<rect class="b gcp oss" x="400" y="140" width="360" height="64" rx="8"/>
+<text class="tag gcp" x="420" y="160">Open source · orchestrator</text>
+<text class="tt" x="420" y="180">Agent Executor (AX)</text>
+<text class="ts" x="420" y="196">declarative tasks: workspace, model, suspend and resume</text>
+
+<rect class="b gcp oss" x="400" y="216" width="360" height="64" rx="8"/>
+<text class="tag gcp" x="420" y="236">Open source · control plane</text>
+<text class="tt" x="420" y="256">Agent Substrate</text>
+<text class="ts" x="420" y="272">creates sandboxed actors, assigns workers, snapshots</text>
+
+<rect class="b gcp oss" x="400" y="292" width="360" height="64" rx="8"/>
+<text class="tag gcp" x="420" y="312">Open source · GA on GKE</text>
+<text class="tt" x="420" y="332">GKE Agent Sandbox</text>
+<text class="ts" x="420" y="348">gVisor or Kata isolation, warm pools, pod snapshots</text>
+
+<rect class="b n" x="400" y="368" width="360" height="41" rx="8"/>
+<text class="tt" x="580" y="393" text-anchor="middle">GKE or any Kubernetes cluster</text>
+
+<line class="ar" x1="200" y1="411" x2="200" y2="448" marker-end="url(#ah3)"/>
+<line class="ar" x1="580" y1="411" x2="580" y2="448" marker-end="url(#ah3)"/>
+
+<rect class="b gcp" x="20" y="450" width="740" height="56" rx="8"/>
+<text class="tt" x="390" y="472" text-anchor="middle">Agent Gateway</text>
+<text class="ts" x="390" y="492" text-anchor="middle">the only way out: checks user, agent and node identity, applies egress and DLP policy, injects credentials</text>
+
+<rect class="b aws oss" x="800" y="40" width="340" height="56" rx="8"/>
+<text class="tt" x="970" y="62" text-anchor="middle">Strands harness</text>
+<text class="ts" x="970" y="82" text-anchor="middle">inside AgentCore Runtime</text>
+
+<rect class="b aws" x="800" y="140" width="340" height="269" rx="8"/>
+<text class="tag aws" x="820" y="164">Managed</text>
+<text class="tt" x="820" y="188">AgentCore Runtime + sandboxes</text>
+<text class="ts" x="820" y="212">microVM per session, idle ones scale to zero</text>
+<text class="ts" x="820" y="232">Code Interpreter and Browser for the hands</text>
+<text class="ts" x="820" y="252">persistent agent filesystem</text>
+<text class="ts" x="820" y="272">deploy and manage with AgentCore CLI + CDK</text>
+<text class="ts" x="820" y="312">no open-source AX or Substrate equivalent</text>
+<text class="ts" x="820" y="332">self-hosted option: your own containers</text>
+<text class="ts" x="820" y="352">on ECS or EKS</text>
+
+<rect class="b aws" x="800" y="450" width="340" height="56" rx="8"/>
+<text class="tt" x="970" y="472" text-anchor="middle">AgentCore Gateway + Identity</text>
+<text class="ts" x="970" y="492" text-anchor="middle">tool access and outbound credentials</text>
+</svg>
+  </div>
+</section>
+
+</div>
