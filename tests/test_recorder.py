@@ -9,7 +9,11 @@ TOOL_USE = {"name": "current_time", "toolUseId": "tooluse_1", "input": {"timezon
 
 def test_writes_one_numbered_line_per_step(tmp_path):
     recorder = TraceRecorder(tmp_path)
-    agent = SimpleNamespace(messages=[{"role": "user", "content": [{"text": "hi"}]}])
+    agent = SimpleNamespace(
+        system_prompt="You are a helpful assistant.",
+        tool_registry=SimpleNamespace(get_all_tool_specs=lambda: [{"name": "current_time"}]),
+        messages=[{"role": "user", "content": [{"text": "hi"}]}],
+    )
 
     recorder.on_model_request(SimpleNamespace(agent=agent))
     recorder.on_model_response(

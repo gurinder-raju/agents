@@ -39,17 +39,20 @@ class TraceRecorder(HookProvider):
         registry.add_callback(AfterInvocationEvent, self.on_invocation_end)
 
     def on_invocation_start(self, event: BeforeInvocationEvent) -> None:
-        self._write(
-            "invocation_start",
-            system_prompt=event.agent.system_prompt,
-            tool_specs=event.agent.tool_registry.get_all_tool_specs(),
-            input=event.messages,
-        )
+        self._write("invocation_start", input=event.messages)
 
     def on_model_request(self, event: BeforeModelCallEvent) -> None:
         # The model keeps no memory between calls: the harness sends the whole conversation every time.
+        # The system prompt and tool specs are read here, not at invocation start, because plugins
+        # such as AgentSkills can change them in their own invocation-start hooks.
         self._model_started = time.perf_counter()
-        self._write("model_request", message_count=len(event.agent.messages), messages=event.agent.messages)
+        self._write(
+            "model_request",
+            system_prompt=event.agent.system_prompt,
+            tool_specs=event.agent.tool_registry.get_all_tool_specs(),
+            message_count=len(event.agent.messages),
+            messages=event.agent.messages,
+        )
 
     def on_model_response(self, event: AfterModelCallEvent) -> None:
         ms = round((time.perf_counter() - self._model_started) * 1000)

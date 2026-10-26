@@ -14,7 +14,10 @@ Needs [uv](https://docs.astral.sh/uv/) and [Ollama](https://ollama.com/download)
 ```bash
 ollama pull gemma4:e2b
 uv run hello-agent "What time is it in Tokyo?"
+uv run hello-agent "Summarize https://example.com"
 uv run pytest
 ```
+
+Skills live in `skills/<name>/SKILL.md`; put your own in `jobs/skills/`, which git ignores.
 
 Each run writes its steps to `traces/<run_id>.jsonl`. Set `AGENT_MODEL` to try another Ollama model, and `OLLAMA_HOST` if Ollama isn't on `localhost:11434`.
