@@ -27,15 +27,17 @@ SKILL_DIRS = ["skills", "jobs/skills"]
 def build_agent(recorder: TraceRecorder) -> Agent:
     model = OllamaModel(
         host=os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
-        model_id=os.environ.get("AGENT_MODEL", "gemma4:e2b"),
+        # gemma4:e4b made no false matches in a benchmark where gemma4:e2b made one to four a run. It
+        # peaks at about 11 GB on a 16 GB Mac; for less memory and more mistakes, set AGENT_MODEL=gemma4:e2b.
+        model_id=os.environ.get("AGENT_MODEL", "gemma4:e4b"),
         temperature=0.2,
         # A cap on each reply, thinking included. Normal replies stay under about 5,000 tokens; without
         # a cap, gemma4:12b once looped on the same text for 60,000 tokens and 30 minutes. ReplyRetry
         # asks again when a reply hits it.
         max_tokens=8192,
-        # Ollama's context window: prompt plus reply, in tokens. 32k fits a day of subreddit posts and
-        # comments; on gemma4:e2b it barely changed memory use on a 16 GB Mac. Ollama only applies
-        # this when it loads the model: if `ollama ps` shows a smaller CONTEXT, run `ollama stop <model>`.
+        # Ollama's context window: prompt plus reply, in tokens. 32k fits a day of a subreddit's posts and
+        # comments, or a week of a quiet one, and it is part of the memory a loaded model takes. Ollama only
+        # applies this when it loads the model: if `ollama ps` shows a smaller CONTEXT, run `ollama stop <model>`.
         options={"num_ctx": 32768},
     )
     # The plugin lists each skill's name and description in the system prompt, and adds a

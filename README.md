@@ -14,11 +14,14 @@ This repository holds only the generic agent. Real jobs, traces, outputs and ses
 Needs [uv](https://docs.astral.sh/uv/) and [Ollama](https://ollama.com/download) with a model that supports tools.
 
 ```bash
-ollama pull gemma4:e2b
+ollama pull gemma4:e4b
 uv run agent-v3 "What time is it in Tokyo?"
 uv run agent-v3 "Go through the new posts in r/Python. For each one, tell me which Python libraries the post or its comments mention."
 uv run pytest
 ```
+
+gemma4:e4b peaks at about 11 GB of memory while it works. On a 16 GB Mac, `AGENT_MODEL=gemma4:e2b` needs
+about 9 GB but makes more mistakes.
 
 Skills live in `skills/<name>/SKILL.md`; put your own in `jobs/skills/`, which git ignores.
 
