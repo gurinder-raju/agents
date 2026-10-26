@@ -8,7 +8,8 @@ from strands.models.ollama import OllamaModel
 from strands.vended_plugins.skills import AgentSkills
 
 from .recorder import TraceRecorder
-from .tools import current_time, fetch_url, read_feed
+from .skill_redirect import SkillNameRedirect
+from .tools import current_time, fetch_url, read_feed, read_subreddit
 
 # Generic on purpose. Instructions for a specific job belong in job files under jobs/, which git ignores.
 SYSTEM_PROMPT = """You are a helpful assistant.
@@ -26,16 +27,18 @@ def build_agent(recorder: TraceRecorder) -> Agent:
         host=os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
         model_id=os.environ.get("AGENT_MODEL", "gemma4:e2b"),
         temperature=0.2,
-        # Ollama's context window: prompt plus reply, in tokens. Set explicitly so a fetched page fits.
-        # Bigger windows use more RAM, so raise this only if the model starts losing track of a page.
-        options={"num_ctx": 8192},
+        # Ollama's context window: prompt plus reply, in tokens. 32k fits a day of subreddit posts and
+        # comments; on gemma4:e2b it barely changed memory use on a 16 GB Mac. Ollama only applies
+        # this when it loads the model: if `ollama ps` shows a smaller CONTEXT, run `ollama stop <model>`.
+        options={"num_ctx": 32768},
     )
+    # The plugin lists each skill's name and description in the system prompt, and adds a
+    # `skills` tool the model calls to load a skill's full instructions when it needs them.
+    skills = AgentSkills(skills=[d for d in SKILL_DIRS if Path(d).is_dir()])
     return Agent(
         model=model,
-        tools=[current_time, fetch_url, read_feed],
+        tools=[current_time, fetch_url, read_feed, read_subreddit],
         system_prompt=SYSTEM_PROMPT,
-        hooks=[recorder],
-        # The plugin lists each skill's name and description in the system prompt, and adds a
-        # `skills` tool the model calls to load a skill's full instructions when it needs them.
-        plugins=[AgentSkills(skills=[d for d in SKILL_DIRS if Path(d).is_dir()])],
+        hooks=[recorder, SkillNameRedirect(skills)],
+        plugins=[skills],
     )

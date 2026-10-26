@@ -8,7 +8,9 @@ If a tool raises, Strands sends the error message back as the result instead, so
 
 import ipaddress
 import json
+import re
 import socket
+import sys
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -75,6 +77,80 @@ def read_feed(url: str, since_hours: float | None = None, max_entries: int = 25)
         kept = kept[:-1]
 
 
+# About 10,000 tokens: room for a day of posts and comments in the model's 32k-token context window.
+MAX_SUBREDDIT_CHARS = 40_000
+COMMENT_CHARS = 500
+MIN_COMMENTS_PER_POST = 5
+_SUBREDDIT_NAME = re.compile(r"^[A-Za-z0-9_]{2,21}$")
+
+
+@tool
+def read_subreddit(subreddit: str, since_hours: float = 24, max_posts: int = 25) -> str:
+    """Read a subreddit's newest posts and each post's comments, as JSON.
+
+    Each post has title, author, published (UTC), link, text (the post body) and comments: a flat
+    list of {author, text}, about 25 at most per post. Without logging in, Reddit allows about one
+    request a minute, and this makes one request per post, so it can take several minutes.
+    If everything doesn't fit, "omitted" counts the posts and comments that were left out.
+
+    Args:
+        subreddit: Subreddit name, for example "Python".
+        since_hours: Only include posts published within this many hours.
+        max_posts: Read comments for at most this many posts, newest first.
+    """
+    name = subreddit.removeprefix("r/").strip("/")
+    if not _SUBREDDIT_NAME.match(name):
+        raise ValueError(f"not a valid subreddit name: {subreddit!r}")
+
+    # The listing holds the newest 100 posts, which covers a day for all but the busiest subreddits.
+    _, listing = parse_feed(http_get(f"https://www.reddit.com/r/{name}/new/.rss?limit=100").text)
+    cutoff = datetime.now(UTC) - timedelta(hours=since_hours)
+    recent = [post for post in listing if post["published"] and post["published"] >= cutoff]
+    to_read = recent[:max_posts]
+
+    posts = []
+    for number, post in enumerate(to_read, 1):
+        _progress(f"read_subreddit: reading comments for post {number} of {len(to_read)}")
+        # A post's comment feed starts with the post itself, then one entry per comment.
+        _, thread = parse_feed(http_get(post["link"] + ".rss").text)
+        comments = [
+            {"author": entry["author"], "text": _shorten(entry["text"], COMMENT_CHARS)}
+            for entry in thread
+            if entry["id"] != post["id"]
+        ]
+        posts.append({key: post[key] for key in ("title", "author", "published", "link", "text")} | {"comments": comments})
+
+    return _fit_subreddit(name, posts, posts_not_read=len(recent) - len(to_read))
+
+
+def _fit_subreddit(name: str, posts: list[dict[str, Any]], posts_not_read: int) -> str:
+    """Cut comments from the end of every post's list, then drop the oldest posts, until the result fits."""
+    comments_per_post = max((len(post["comments"]) for post in posts), default=0)
+    while True:
+        shown = [post | {"comments": post["comments"][:comments_per_post]} for post in posts]
+        omitted_comments = sum(len(post["comments"]) for post in posts) - sum(len(p["comments"]) for p in shown)
+        result = json.dumps(
+            {"subreddit": name, "posts": shown, "omitted": {"posts": posts_not_read, "comments": omitted_comments}},
+            default=_iso,
+        )
+        if len(result) <= MAX_SUBREDDIT_CHARS or not posts:
+            return result
+        if comments_per_post > MIN_COMMENTS_PER_POST:
+            comments_per_post -= 1
+        else:
+            posts = posts[:-1]
+            posts_not_read += 1
+
+
+def _shorten(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit] + " [...]"
+
+
+def _progress(message: str) -> None:
+    """Long tool calls report progress on stderr, so the terminal shows what the agent is waiting on."""
+    print(message, file=sys.stderr, flush=True)
+
+
 def _iso(value: Any) -> str:
     return value.isoformat() if isinstance(value, datetime) else str(value)
 
@@ -116,6 +192,7 @@ def _wait_for(host: str) -> None:
     if delay > MAX_RATE_LIMIT_WAIT_S:
         raise RuntimeError(f"{host} asked us to wait {round(delay)} s before the next request; try again later")
     if delay > 0:
+        _progress(f"waiting {round(delay)} s for {host}'s rate limit")
         time.sleep(delay)
 
 
@@ -199,8 +276,7 @@ def _parse_time(value: str | None) -> datetime | None:
 
 
 def _entry_text(html: str | None) -> str:
-    text = html_to_text(html or "")
-    return text if len(text) <= FEED_TEXT_CHARS else text[:FEED_TEXT_CHARS] + " [...]"
+    return _shorten(html_to_text(html or ""), FEED_TEXT_CHARS)
 
 
 class _TextExtractor(HTMLParser):
