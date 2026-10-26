@@ -1,0 +1,27 @@
+"""The agent: which model it calls, which tools it has, and how it is told to behave."""
+
+import os
+
+from strands import Agent
+from strands.models.ollama import OllamaModel
+
+from .recorder import TraceRecorder
+from .tools import current_time
+
+# Generic on purpose. Instructions for a specific job belong in job files under jobs/, which git ignores.
+SYSTEM_PROMPT = """You are a helpful assistant.
+Use your tools when they help you answer. If you can't do something, say so plainly."""
+
+
+def build_agent(recorder: TraceRecorder) -> Agent:
+    model = OllamaModel(
+        host=os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
+        model_id=os.environ.get("AGENT_MODEL", "gemma4:e2b"),
+        temperature=0.2,
+    )
+    return Agent(
+        model=model,
+        tools=[current_time],
+        system_prompt=SYSTEM_PROMPT,
+        hooks=[recorder],
+    )
