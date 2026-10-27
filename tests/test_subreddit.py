@@ -156,3 +156,21 @@ def test_says_what_it_read_and_keeps_real_characters(fake_reddit):
 
     assert "🐍" in result  # not \\ud83d\\udc0d, which the model would copy into its quotes
     assert agent.state.get(tools.COVERAGE) == ["r/learnpython: 1 posts and 2 comments from the last 24 hours."]
+
+
+def test_numbers_posts_and_runs_local_text_transforms(fake_reddit):
+    agent = SimpleNamespace(state=AgentState(), text_transforms=[lambda text: text.replace("venv", "VENV")])
+    [post] = json.loads(read_subreddit(subreddit="learnpython", agent=agent))["posts"]
+
+    assert post["id"] == "learnpython-1"
+    assert post["comments"][0]["text"] == "uv creates the VENV for you."
+    assert agent.state.get(tools.POST_IDS) == {"learnpython-1": POST_LINK}
+
+
+def test_a_failing_transform_leaves_the_text_alone(fake_reddit):
+    def broken(text):
+        raise RuntimeError("bug in a local tool")
+
+    agent = SimpleNamespace(state=AgentState(), text_transforms=[broken])
+    [post] = json.loads(read_subreddit(subreddit="learnpython", agent=agent))["posts"]
+    assert post["comments"][0]["text"] == "uv creates the venv for you."

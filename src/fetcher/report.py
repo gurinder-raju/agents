@@ -69,10 +69,36 @@ def match_sources(items: list[dict[str, Any]], sources: dict[str, dict[str, Any]
             item["title"] = source["title"]
         if source.get("comment_count") is not None:
             item["comment_count"] = source["comment_count"]
-        if item["quote"] and f" {_words(item['quote'])} " not in f" {_words(source['text'])} ":
+        if item["quote"] and not contains_words(source["text"], item["quote"]):
             item["quote_not_found"] = True
             not_found.append(item["quote"])
     return not_found
+
+
+def merge_duplicates(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """One entry per post: items whose first link is the same page become one, keeping every second link.
+
+    Returns the merged items and how many were folded into others.
+    """
+    merged: list[dict[str, Any]] = []
+    by_page: dict[str, dict[str, Any]] = {}
+    for item in items:
+        page = canonical_link(item["links"][0]["url"])
+        first = by_page.get(page)
+        if first is None:
+            by_page[page] = item
+            merged.append(item)
+            continue
+        seen = {canonical_link(link["url"]) for link in first["links"]}
+        first["links"] += [link for link in item["links"][1:] if canonical_link(link["url"]) not in seen]
+        first["quote"] = first["quote"] or item["quote"]
+        first["description"] = first["description"] or item["description"]
+    return merged, len(items) - len(merged)
+
+
+def contains_words(text: str, phrase: str) -> bool:
+    """Whether `phrase` appears in `text` as whole words, whatever the case, punctuation and spacing."""
+    return f" {_words(phrase)} " in f" {_words(text)} "
 
 
 def canonical_link(url: str) -> str:
@@ -150,6 +176,7 @@ def _render_item(item: dict[str, Any]) -> str:
         + (' <span class="missing">(not found)</span>' if link.get("missing") else "")
         + (' <span class="missing">(unverified)</span>' if link.get("unverified") else "")
         + (f' <span class="note" title="{escape(link["closest_to"])}">(closest page that exists)</span>' if link.get("closest_to") else "")
+        + (' <span class="missing">(value not in the post)</span>' if link.get("value_not_found") else "")
         for link in item["links"]
     )
     count = item.get("comment_count")

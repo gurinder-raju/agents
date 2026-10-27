@@ -11,7 +11,7 @@ allowed-tools: read_subreddit
    Add `sort="comments"` if the user wants the most commented posts first.
    It fetches the posts and their comments for you. Reddit allows about one request a minute, so it
    can take a few minutes. Don't call it again while you wait, and don't fetch posts yourself.
-2. You get a list of posts. Each has `title`, `author`, `published`, `link`, `url` (the page a link
+2. You get a list of posts. Each has `id` (a short name such as `Python-3`), `title`, `author`, `published`, `link`, `url` (the page a link
    post points to), `text` (the post body), `comment_count` and `comments`, a flat list of
    `{author, text}`, oldest first. A reply isn't nested under the comment it answers.
    If `posts` is empty, say there were no posts in the last 24 hours and stop.

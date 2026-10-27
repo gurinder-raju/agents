@@ -23,14 +23,22 @@ from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, TextIO
-from urllib.parse import quote, urljoin, urlsplit
+from urllib.parse import quote, unquote, urljoin, urlsplit
 from xml.etree import ElementTree
 from zoneinfo import ZoneInfo
 
 import httpx
 from strands import ToolContext, tool
 
-from .report import canonical_link, match_sources, normalize_items, render_report, report_filename
+from .report import (
+    canonical_link,
+    contains_words,
+    match_sources,
+    merge_duplicates,
+    normalize_items,
+    render_report,
+    report_filename,
+)
 
 # About 3,000 tokens: enough for most articles, small enough for a local model's context window.
 MAX_PAGE_CHARS = 12_000
@@ -86,7 +94,8 @@ def read_feed(url: str, since_hours: float | None = None, max_entries: int = 25,
         cutoff = datetime.now(UTC) - timedelta(hours=since_hours)
         entries = [e for e in entries if e["published"] is None or e["published"] >= cutoff]
 
-    kept = entries[:max_entries]
+    kept = [entry | {"title": _transform(agent, entry["title"] or ""), "text": _transform(agent, entry["text"])}
+            for entry in entries[:max_entries]]
     _remember_sources(agent, {e["link"]: {"title": e["title"], "text": f"{e['title']}\n{e['text']}"} for e in kept})
     while True:
         result = json.dumps(
@@ -113,8 +122,9 @@ _REDDIT_TRAILER = re.compile(r"\s*submitted by\s+/u/\S+\s*(\[link\])?\s*(\[comme
 def read_subreddit(subreddit: str, since_hours: float = 24, sort: str = "new", agent: Any = None) -> str:
     """Read a subreddit's newest posts and their comments, as JSON.
 
-    Each post has title, author, published (UTC), link, url (the page a link post points to, if any),
-    text (the post body), comment_count and comments: a flat list of {author, text}, oldest first.
+    Each post has id (a short name for it, such as Python-3, to give write_report), title, author,
+    published (UTC), link, url (the page a link post points to, if any), text (the post body),
+    comment_count and comments: a flat list of {author, text}, oldest first.
     Without logging in, Reddit allows about one request a minute. This reads the post list, then the
     subreddit's comment feed 100 comments at a time, so a day of a busy subreddit takes a few minutes.
     If everything doesn't fit, "omitted" counts the posts and comments that were left out.
@@ -143,9 +153,7 @@ def read_subreddit(subreddit: str, since_hours: float = 24, sort: str = "new", a
     for comment in reversed(comments):  # the feed is newest first; keep each thread oldest first
         match = _POST_ID.search(comment["link"] or "")
         if match:
-            by_post.setdefault(match.group(1), []).append(
-                {"author": comment["author"], "text": _shorten(comment["text"], COMMENT_CHARS)}
-            )
+            by_post.setdefault(match.group(1), []).append({"author": comment["author"], "text": comment["text"]})
 
     posts = []
     for post in recent:
@@ -159,17 +167,36 @@ def read_subreddit(subreddit: str, since_hours: float = 24, sort: str = "new", a
                 "comments": thread,
             }
         )
+    return present_posts(name, posts, since_hours, sort, comments_complete, agent)
+
+
+def present_posts(
+    name: str, posts: list[dict[str, Any]], since_hours: float, sort: str, comments_complete: bool, agent: Any
+) -> str:
+    """Turn a subreddit's posts into what the model reads: rewritten by any local text transforms,
+    numbered, remembered for write_report, and cut to fit the model's context window."""
+    for post in posts:
+        post["title"] = _transform(agent, post["title"])
+        post["text"] = _transform(agent, post["text"])
+        post["comments"] = [
+            comment | {"text": _shorten(_transform(agent, comment["text"]), COMMENT_CHARS)} for comment in post["comments"]
+        ]
     if sort == "comments":
         posts.sort(key=lambda post: post["comment_count"], reverse=True)
+    # A short id per post, such as Python-3, for write_report: small models often mangle the long
+    # ids in Reddit links when they copy them.
+    posts = [{"id": f"{name}-{number}"} | post for number, post in enumerate(posts, 1)]
 
     _remember_sources(agent, {
         post["link"]: {
+            "id": post["id"],
             "title": post["title"],
             "comment_count": post["comment_count"],
             "text": "\n".join([post["title"], post["text"], *(c["text"] for c in post["comments"])]),
         }
         for post in posts
     })
+    _remember_post_ids(agent, {post["id"]: post["link"] for post in posts})
     result = _fit_subreddit(name, posts, 0, comments_complete)
     omitted = json.loads(result)["omitted"]
     coverage = (
@@ -182,6 +209,16 @@ def read_subreddit(subreddit: str, since_hours: float = 24, sort: str = "new", a
         coverage += f" Comment counts may be low: the comment feed stopped after {MAX_COMMENT_PAGES} pages."
     _remember_coverage(agent, coverage)
     return result
+
+
+def _transform(agent: Any, text: str) -> str:
+    """Apply the local text transforms (from jobs/tools/) in turn. One that fails leaves the text as it was."""
+    for transform in getattr(agent, "text_transforms", None) or []:
+        try:
+            text = transform(text)
+        except Exception as error:  # a private transform's bug shouldn't stop the run
+            _progress(f"text transform {getattr(transform, '__module__', transform)} failed: {error}")
+    return text
 
 
 def _read_comment_feed(name: str, cutoff: datetime) -> tuple[list[dict[str, Any]], bool]:
@@ -232,12 +269,15 @@ def write_report(
         title: Short title for the report, for example "r/Python posts that mention uv".
         criteria: In one or two sentences, what made a post or page count as a match.
         items: One object per match, with these fields:
-            link: the post or page that matches, exactly as your tools returned it.
+            post: for a Reddit post, its id from read_subreddit, such as Python-3. The report builds
+                the post's link from it.
+            link: for a feed entry or a page, its link exactly as your tools returned it.
             description: one sentence on why it matches.
             quote: the exact words from the post or its comments that match, copied word for word.
             fill: if the user gave a link pattern with a placeholder, such as
                 https://example.com/search?q=<name>, the value you found for the placeholder in this
-                post, such as a name. The report builds the second link from it.
+                post, such as a name. The report builds the second link from it. Give one in every
+                item: items without a value are left out of the report.
             extra_link: otherwise, an optional second link your tools returned, such as the page a
                 link post points to. Never make one up.
             extra_label: one or two words for the second link, such as "download".
@@ -247,9 +287,20 @@ def write_report(
         raise ValueError('sort must be "as_given" or "comments"')
     agent = tool_context.agent
     prompt = _user_prompt(agent.messages)
+    sources = agent.state.get(SOURCES) or {}
     templates = [template.rstrip(".,;:)") for template in _URL_TEMPLATE.findall(prompt)]
-    items = normalize_items([_fill_template(item, templates) for item in items])
-    unmatched_quotes = match_sources(items, agent.state.get(SOURCES) or {})
+    resolved = [_resolve_post(item, agent.state.get(POST_IDS) or {}, sources) for item in items]
+    unknown_posts = [problem for item, problem in resolved if problem]
+    items = normalize_items([_fill_template(item, templates) for item, problem in resolved if not problem])
+    items, merged = merge_duplicates(items)
+    without_value = 0
+    if len(templates) == 1:
+        # The user asked for a link built from a value found in each post; an item without one has
+        # nothing to show, so it stays out of the report.
+        without_value = sum(1 for item in items if len(item["links"]) < 2)
+        items = [item for item in items if len(item["links"]) >= 2]
+    unmatched_quotes = match_sources(items, sources)
+    made_up_values = _check_filled_values(items, templates, sources)
     unverified = _find_unverified_links(items, prompt, agent.messages)
     missing = _find_missing_links(items)
     if sort == "comments":
@@ -268,7 +319,15 @@ def write_report(
 
     replaced = [f"{link['closest_to']} -> {link['url']}" for item in items for link in item["links"] if "closest_to" in link]
     note = f" These links don't exist, so it links the closest page that does: {', '.join(replaced)}." if replaced else ""
+    if merged:
+        note += f" Merged {merged} items that repeated a post into the first item for that post."
+    if without_value:
+        note += f" Left out {without_value} items with no value for the link pattern the user gave."
     problems = []
+    if unknown_posts:
+        problems.append(f"these post ids aren't from read_subreddit, so those items were left out: {', '.join(unknown_posts)}")
+    if made_up_values:
+        problems.append(f"these values aren't in their post or its comments: {' | '.join(made_up_values)}")
     if unmatched_quotes:
         problems.append(f"these quotes aren't in their post or its comments: {' | '.join(unmatched_quotes)}")
     if unverified:
@@ -289,16 +348,88 @@ _URL_TEMPLATE = re.compile(r"https?://[^\s\"'<>{}\\]*(?:<[^<>]+>|\{[^{}]+\})[^\s
 _PLACEHOLDER = re.compile(r"<[^<>]+>|\{[^{}]+\}")
 
 
+_REDDIT_POST = re.compile(r"/r/(\w+)/comments/\w+/([^/?#]+)", re.I)
+
+
+def _resolve_post(item: Any, post_ids: dict[str, str], sources: dict[str, Any]) -> tuple[Any, str | None]:
+    """Turn an item's post id into the post's link, and fix a Reddit link whose id the model mangled.
+
+    Returns the item and, for a post id read_subreddit never handed out, that id as a problem.
+    """
+    if not isinstance(item, dict):
+        return item, None
+    post = str(item.get("post") or "").strip()
+    if post:
+        link = next((link for post_id, link in post_ids.items() if post_id.lower() == post.lower()), None)
+        if link:
+            return item | {"link": link}, None
+        if not item.get("link"):
+            return item, post
+    link = str(item.get("link") or "")
+    wanted = _REDDIT_POST.search(link)
+    if wanted and canonical_link(link) not in sources:
+        # Same subreddit and same title words in the link: the post the model meant, if only one matches.
+        same = [known for known in post_ids.values()
+                if (m := _REDDIT_POST.search(known)) and m.group(1).lower() == wanted.group(1).lower()
+                and m.group(2).lower() == wanted.group(2).lower()]
+        if len(same) == 1:
+            return item | {"link": same[0]}, None
+    return item, None
+
+
+def _check_filled_values(items: list[dict[str, Any]], templates: list[str], sources: dict[str, Any]) -> list[str]:
+    """Mark second links that fill the user's pattern with a value that isn't in their post.
+
+    A small model asked to decode or look up a value may write a plausible one instead. Returns those values.
+    """
+    made_up = []
+    for item in items:
+        source = sources.get(canonical_link(item["links"][0]["url"]))
+        if source is None:
+            continue
+        for link in item["links"][1:]:
+            value = _template_value(link["url"], templates)
+            if value and not contains_words(source["text"], value):
+                link["value_not_found"] = True
+                made_up.append(value)
+    return made_up
+
+
+def _template_value(url: str, templates: list[str]) -> str | None:
+    """The value a URL put in place of the placeholder of one of the user's patterns, if it fills one."""
+    for template in templates:
+        prefix, suffix = _PLACEHOLDER.split(template, maxsplit=1)
+        fills = url.lower().startswith(prefix.lower()) and url.lower().endswith(suffix.lower())
+        if fills and len(url) > len(prefix) + len(suffix):
+            return unquote(url[len(prefix): len(url) - len(suffix)]).strip()
+    return None
+
+
 def _fill_template(item: Any, templates: list[str]) -> Any:
     """Build an item's second link from the user's link pattern and the value the model found for it.
 
     The model only has to find the value; a small model often mangles a URL it writes itself, for
     example python<version> as python315. With more than one pattern, the model gives extra_link instead.
+    A small model also often leaves fill out and puts the value in quote; a quote short enough to be a
+    single value, such as a name or an id, stands in for it. _check_filled_values still checks it.
     """
-    if not isinstance(item, dict) or not str(item.get("fill") or "").strip() or len(templates) != 1:
+    if not isinstance(item, dict) or len(templates) != 1:
         return item
-    value = quote(str(item["fill"]).strip(), safe="")
-    return item | {"extra_link": _PLACEHOLDER.sub(lambda _: value, templates[0], count=1)}
+    value = str(item.get("fill") or "").strip()
+    if not value and not item.get("extra_link"):
+        value = _single_value(str(item.get("quote") or ""))
+    if not value:
+        return item
+    return item | {"extra_link": _PLACEHOLDER.sub(lambda _: quote(value, safe=""), templates[0], count=1)}
+
+
+def _single_value(text: str) -> str:
+    """The text, if it's short enough to be one value (at most 60 characters and 4 words), without
+    quotation marks or a [label: ...] wrapper; otherwise nothing."""
+    text = text.strip().strip('"\u201c\u201d')
+    if wrapped := re.fullmatch(r"\[\w+: (.+)\]", text):
+        text = wrapped.group(1).strip()
+    return text if 0 < len(text) <= 60 and len(text.split()) <= 4 else ""
 # The part of a URL before a placeholder such as <name> or {name}.
 _URL_PATTERN = re.compile(r"(https?://[^\s\"'<>{}\\]+)[<{]")
 
@@ -395,6 +526,16 @@ def _remember_sources(agent: Any, sources: dict[str | None, dict[str, Any]]) -> 
 # Key in the agent's state for one line per source read, such as how many posts a subreddit had and
 # how many didn't fit, so the report says what it covers.
 COVERAGE = "coverage"
+
+
+# Key in the agent's state for the short post ids read_subreddit hands out, mapped to each post's link.
+POST_IDS = "post_ids"
+
+
+def _remember_post_ids(agent: Any, ids: dict[str, str]) -> None:
+    if agent is None:
+        return
+    agent.state.set(POST_IDS, (agent.state.get(POST_IDS) or {}) | ids)
 
 
 def _remember_coverage(agent: Any, line: str) -> None:

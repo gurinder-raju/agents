@@ -1,5 +1,6 @@
 # Private: never commit what this agent is used for.
-# Real job files: prompts, URLs, what to do with the content.
+# Real job files: prompts, URLs, what to do with the content, and your own skills (jobs/skills/)
+# and tools (jobs/tools/), such as a decoder for one community's conventions.
 jobs/
 # Step-by-step run records; they contain prompts and model output.
 traces/

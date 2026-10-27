@@ -23,7 +23,10 @@ uv run pytest
 gemma4:e4b peaks at about 11 GB of memory while it works, so fetcher unloads it as soon as a run ends. On a
 16 GB Mac, `AGENT_MODEL=gemma4:e2b` needs about 9 GB but makes more mistakes.
 
-Skills live in `skills/<name>/SKILL.md`; put your own in `jobs/skills/`, which git ignores.
+Skills live in `skills/<name>/SKILL.md`; put your own in `jobs/skills/`, which git ignores. Put your own
+tools in `jobs/tools/<name>.py`, which git also ignores: a file there can define `TOOLS`, a list of `@tool`
+functions for the model, and `transform_text(text)`, which rewrites every post, comment and feed entry
+before the model reads it.
 
 Ask for a report and the agent saves an HTML page of links, with your prompt and its criteria at the top,
 to `outputs/reports/<run_id>-<title>.html`. Like traces, reports are gitignored. Each match can have a

@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -184,13 +185,80 @@ def test_builds_the_second_link_from_the_users_pattern_and_the_value_found(repor
     result = write_report(
         title="t",
         criteria="c",
-        items=[{"link": POST, "fill": "3.15", "extra_label": "download"}, {"link": QUIET, "fill": "free threading"}],
+        items=[{"link": QUIET, "fill": "3.14", "extra_label": "download"}, {"link": POST, "fill": "uv 0.9"}],
         tool_context=tool_context(prompt),
     )
-    assert "But" not in result and "but" not in result  # built from the user's pattern, so not unverified
+    assert "but" not in result.lower()  # built from the user's pattern, with values that are in the posts
     html = open(result).read()
-    assert '<a href="https://example.org/latest/python3.15/" rel="noopener noreferrer">download</a>' in html
-    assert 'href="https://example.org/latest/pythonfree%20threading/"' in html
+    assert '<a href="https://example.org/latest/python3.14/" rel="noopener noreferrer">download</a>' in html
+    assert 'href="https://example.org/latest/pythonuv%200.9/"' in html
+
+
+def test_a_short_quote_stands_in_for_a_missing_fill(report_dir):
+    prompt = "Link each post to https://example.org/search?q=<name>."
+    items = [
+        {"link": QUIET, "quote": "[decoded: Python]"},  # a wrapper some text transforms add
+        {"link": POST, "quote": "We moved to uv 0.9 last week, and it was the best change we made all year."},
+    ]
+    write_report(title="t", criteria="c", items=items, tool_context=tool_context(prompt))
+    [path] = report_dir.iterdir()
+    html = path.read_text()
+    assert 'href="https://example.org/search?q=Python"' in html
+    assert html.count('href="https://example.org/search?q=') == 1  # a long quote isn't a value
+
+
+def test_leaves_out_items_with_no_value_for_the_users_pattern(report_dir):
+    prompt = "Link each post to https://example.org/search?q=<name>."
+    items = [
+        {"link": QUIET, "fill": "Python"},
+        {"link": POST, "description": "No name in this one.", "quote": "We moved to uv 0.9 last week, and nobody here named anyone at all."},
+    ]
+    write_report(title="t", criteria="c", items=items, tool_context=tool_context(prompt))
+    [path] = report_dir.iterdir()
+    html = path.read_text()
+    assert "A quiet post" in html and "Switched to uv" not in html
+    assert "1 match" in html
+
+
+def test_flags_a_filled_value_that_is_not_in_the_post(report_dir):
+    prompt = "Link each post to https://example.org/search?q=<name>."
+    items = [{"link": QUIET, "fill": "Phantom"}, {"link": POST, "extra_link": "https://example.org/search?q=Ghost"}]
+    result = write_report(title="t", criteria="c", items=items, tool_context=tool_context(prompt))
+
+    assert "these values aren't in their post or its comments: Phantom | Ghost" in result
+    [path] = report_dir.iterdir()
+    assert path.read_text().count("(value not in the post)") == 2
+
+
+def test_resolves_post_ids_and_fixes_a_mangled_reddit_link(report_dir):
+    context = tool_context()
+    context.agent.state.set(tools.POST_IDS, {"Python-1": POST, "Python-2": QUIET})
+    mangled = QUIET.replace("/9zz/", "/9zzq/")  # the id garbled, the title words intact
+    result = write_report(
+        title="t",
+        criteria="c",
+        items=[{"post": "python-1", "description": "By id."}, {"link": mangled, "description": "By link."}, {"post": "Python-9"}],
+        tool_context=context,
+    )
+    assert "these post ids aren't from read_subreddit, so those items were left out: Python-9" in result
+    html = (report_dir / Path(result.split("Saved ")[1].split(",")[0]).name).read_text()
+    assert f'<a href="{POST}" rel="noopener noreferrer">Switched to uv</a>' in html
+    assert f'<a href="{QUIET}" rel="noopener noreferrer">A quiet post</a>' in html
+    assert "(unverified)" not in html
+
+
+def test_merges_items_that_repeat_a_post(report_dir):
+    prompt = "Link each post to https://example.org/search?q=<name>."
+    items = [
+        {"link": QUIET, "fill": "Python", "quote": "Python 3.14 is out"},
+        {"link": QUIET, "fill": "quiet"},
+        {"link": QUIET, "fill": "Python"},
+    ]
+    result = write_report(title="t", criteria="c", items=items, tool_context=tool_context(prompt))
+    assert "Merged 2 items" in result
+    html = open(result.split("Saved ")[1].split(".html")[0] + ".html").read()
+    assert html.count("<li>") == 1
+    assert html.count('href="https://example.org/search?q=') == 2  # q=Python and q=quiet, each once
 
 
 def test_ignores_fill_when_the_prompt_has_no_single_pattern(report_dir):

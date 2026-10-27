@@ -1,8 +1,11 @@
 """The agent: which model it calls, which tools it has, and how it is told to behave."""
 
+import importlib.util
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import ollama
 from strands import Agent
@@ -24,6 +27,8 @@ its name before anything else, then follow the instructions it returns."""
 # Each skill is a folder with a SKILL.md. skills/ holds generic ones and is committed;
 # jobs/skills/ is for your own, and git ignores it. Paths are relative to where you run the agent.
 SKILL_DIRS = ["skills", "jobs/skills"]
+# Your own tools, which git also ignores. See load_local_tools.
+LOCAL_TOOL_DIR = Path("jobs/tools")
 
 
 def build_agent(recorder: TraceRecorder) -> Agent:
@@ -45,14 +50,44 @@ def build_agent(recorder: TraceRecorder) -> Agent:
     # The plugin lists each skill's name and description in the system prompt, and adds a
     # `skills` tool the model calls to load a skill's full instructions when it needs them.
     skills = AgentSkills(skills=[d for d in SKILL_DIRS if Path(d).is_dir()])
-    return Agent(
+    local_tools, text_transforms = load_local_tools()
+    agent = Agent(
         model=model,
-        tools=[current_time, fetch_url, read_feed, read_subreddit, write_report],
+        tools=[current_time, fetch_url, read_feed, read_subreddit, write_report, *local_tools],
         system_prompt=SYSTEM_PROMPT,
         # Registered after the recorder, so it runs first after a model call and the trace shows its retries.
         hooks=[recorder, SkillNameRedirect(skills), ReplyRetry()],
         plugins=[skills],
     )
+    # The read tools run these on every post, comment and feed entry before the model reads them.
+    agent.text_transforms = text_transforms
+    return agent
+
+
+def load_local_tools(folder: Path = LOCAL_TOOL_DIR) -> tuple[list[Any], list[Callable[[str], str]]]:
+    """Load your own tools from jobs/tools/, which git ignores, so they never reach the repository.
+
+    Each .py file there may define TOOLS, a list of @tool functions to give the model, and
+    transform_text(text), which rewrites every post, comment and feed entry before the model reads
+    it: for example, decoding text that a community hides in a code the model can't read reliably.
+    Files whose names start with _ or test_ are skipped. A file that fails to load is skipped with a warning.
+    """
+    tools: list[Any] = []
+    transforms: list[Callable[[str], str]] = []
+    for path in sorted(folder.glob("*.py")) if folder.is_dir() else []:
+        if path.name.startswith(("_", "test_")):
+            continue
+        spec = importlib.util.spec_from_file_location(f"fetcher_local_tools.{path.stem}", path)
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+        except Exception as error:
+            print(f"skipping local tool file {path}: {error}", file=sys.stderr)
+            continue
+        tools += list(getattr(module, "TOOLS", []))
+        if callable(transform := getattr(module, "transform_text", None)):
+            transforms.append(transform)
+    return tools, transforms
 
 
 def unload_model(agent: Agent) -> None:
