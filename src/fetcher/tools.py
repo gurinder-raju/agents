@@ -41,9 +41,10 @@ from .report import (
     ItemContract,
     ReportError,
     canonical_link,
+    combine_values,
     contains_words,
+    count_records,
     match_sources,
-    merge_duplicates,
     normalize_items,
     parse_report,
     render_report,
@@ -388,22 +389,22 @@ def _save_report(title: Any, criteria: Any, items: Any, sort: Any, tool_context:
     sources = agent.state.get(SOURCES) or {}
     templates = link_patterns(prompt)
     unknown = [name for name in tool_context.tool_use.get("input", {}) if name not in ARGUMENTS]
-    flat_items, adapted = parse_report(title, criteria, items, sort, item_contract(prompt), unknown)
+    rows, adapted = parse_report(title, criteria, items, sort, item_contract(prompt), unknown)
 
-    kept, unknown_posts, without_value = _resolve_items(flat_items, templates, agent.state.get(POST_IDS) or {}, sources)
-    items, merged = merge_duplicates(normalize_items(kept))
-    unmatched_quotes = match_sources(items, sources)
-    made_up_values = _check_filled_values(items, templates, sources)
-    unsourced = _find_unsourced_links(items, prompt, agent.messages)
+    kept, unknown_posts, without_value = _resolve_items(rows, templates, agent.state.get(POST_IDS) or {}, sources)
+    records, repeats = combine_values(normalize_items(kept))
+    unmatched_quotes = match_sources(records, sources)
+    made_up_values = _check_filled_values(records, sources)
+    unsourced = _find_unsourced_links(records, prompt, agent.messages)
     # The one step that uses the network. Everything else here works offline.
     verified = settings.get("verify_links", True)
     if verified:
-        verify_links(items)
+        verify_links(records)
     if sort == "comments":
-        items.sort(key=lambda item: item.get("comment_count", -1), reverse=True)
+        records.sort(key=lambda record: record.get("comment_count", -1), reverse=True)
 
-    problems = _problems(items, unknown_posts, made_up_values, unmatched_quotes, unsourced)
-    left_out = f"Left out {without_value} items with no value for the link pattern the user gave." if without_value else ""
+    problems = _problems(records, unknown_posts, made_up_values, unmatched_quotes, unsourced)
+    left_out = f"Left out {len(without_value)} items with no value for the link pattern the user gave." if without_value else ""
     reads = list((agent.state.get(COVERAGE) or {}).values())
     gaps = [read["line"] for read in reads if read["status"] != "complete"]
     other_warnings = {
@@ -411,7 +412,7 @@ def _save_report(title: Any, criteria: Any, items: Any, sort: Any, tool_context:
         "no_sources_read": not reads,
         "source_incomplete": any(read["status"] == "incomplete" for read in reads),
         "source_failed": any(read["status"] == "failed" for read in reads),
-        "merged_items": merged,
+        "duplicate_items": repeats,
         "legacy_item": adapted,
         "links_not_checked": not verified,
     }
@@ -423,7 +424,7 @@ def _save_report(title: Any, criteria: Any, items: Any, sort: Any, tool_context:
     coverage = [read["line"] for read in reads] + ([] if verified else ["Links were not checked over the network."])
     try:
         html = render_report(
-            title, prompt, criteria, items, created, coverage, by_comments=sort == "comments", notices=notices, empty=_nothing_found(reads)
+            title, prompt, criteria, records, created, coverage, by_comments=sort == "comments", notices=notices, empty=_nothing_found(reads)
         )
     except Exception as error:  # a bug in rendering, which the model can't fix by sending the items again
         raise ReportError("render", [repr(error)]) from error
@@ -431,14 +432,16 @@ def _save_report(title: Any, criteria: Any, items: Any, sort: Any, tool_context:
     # at once in one folder, so without one, a random suffix keeps their reports apart.
     run_id = settings.get("run_id") or created.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
     path = REPORT_DIR / report_filename(run_id, title)
+    # The same records the page was built from, so whatever reads this gets exactly what the page shows.
     record = {
         "schema_version": REPORT_SCHEMA_VERSION,
         "run_id": run_id,
         "path": str(path.resolve()),
         "status": "saved",
-        "matches": len(items),
+        "counts": count_records(records),
         "warnings": warnings,
-        "skipped": {"unknown_post": len(unknown_posts), "no_value": without_value},
+        "skipped": {"unknown_post": len(unknown_posts), "no_value": len(without_value), "duplicate": repeats},
+        "items": records,
     }
     try:
         # For whatever reads reports downstream: the same facts as the page, as data. The page goes last,
@@ -447,15 +450,15 @@ def _save_report(title: Any, criteria: Any, items: Any, sort: Any, tool_context:
             data = path.with_suffix(".json")
             record["data_path"] = str(data.resolve())
             details = {"title": title, "prompt": prompt, "criteria": criteria, "created": created.isoformat(timespec="seconds")}
-            _save_atomically(data, json.dumps(record | details | {"sources": reads, "items": items}, ensure_ascii=False, indent=2))
+            _save_atomically(data, json.dumps(record | details | {"sources": reads}, ensure_ascii=False, indent=2))
         _save_atomically(path, html)
     except OSError as error:
         raise ReportError("write", [str(error)]) from error
     _progress(f"write_report: saved {path}")
 
     note = f" {left_out}" if left_out else ""
-    if merged:
-        note += f" Merged {merged} items that repeated a post into the first item for that post."
+    if repeats:
+        note += f" Dropped {repeats} exact repeats of an item."
     if adapted:
         note += f" Read {adapted} items in an older shape; next time use only the fields this tool lists."
     if gaps or not reads:
@@ -470,29 +473,30 @@ def _save_report(title: Any, criteria: Any, items: Any, sort: Any, tool_context:
 
 def _resolve_items(
     items: list[dict[str, str]], templates: list[str], post_ids: dict[str, str], sources: dict[str, Any]
-) -> tuple[list[dict[str, str]], list[str], int]:
-    """Give each item its links. Returns the items kept, the post ids no read tool handed out, and how many had no value."""
+) -> tuple[list[dict[str, str]], list[str], list[dict[str, str]]]:
+    """Give each item its links. Returns the items kept, the post ids no read tool handed out, and the items with no value."""
     kept = []
     unknown_posts = []
-    without_value = 0
+    without_value = []
     for item in items:
         resolved = _resolve_source(item, post_ids, sources)
         if resolved is None:
             unknown_posts.append(item["post"])
         elif "fill" not in item:
-            kept.append(resolved)
+            value = _template_value(resolved.get("extra_link", ""), templates)
+            kept.append(resolved | ({"fill": value} if value else {}))
         elif item["fill"]:
             kept.append(_fill_pattern(resolved, templates[0]))
         else:  # the user asked for a link built from a value in each post, and this post has none
-            without_value += 1
+            without_value.append(resolved)
     return kept, unknown_posts, without_value
 
 
 def _problems(
-    items: list[dict[str, Any]], unknown_posts: list[str], made_up_values: list[str], unmatched_quotes: list[str], unsourced: list[str]
+    records: list[dict[str, Any]], unknown_posts: list[str], made_up_values: list[str], unmatched_quotes: list[str], unsourced: list[str]
 ) -> dict[str, str]:
-    """What's wrong with the report's items, as warning codes and the sentences that explain them."""
-    links = [link for item in items for link in item["links"]]
+    """What's wrong with the report's records, as warning codes and the sentences that explain them."""
+    links = list({link["url"]: link for record in records for link in record["links"]}.values())
     missing = [_with_closest(link) for link in links if link["check"] == "missing"]
     unreachable = [link["url"] for link in links if link["check"] == "unreachable"]
     checks = {
@@ -589,21 +593,17 @@ def _resolve_source(item: dict[str, str], post_ids: dict[str, str], sources: dic
     return None if "post" in item else item
 
 
-def _check_filled_values(items: list[dict[str, Any]], templates: list[str], sources: dict[str, Any]) -> list[str]:
-    """Mark second links that fill the user's pattern with a value that isn't in their post.
+def _check_filled_values(records: list[dict[str, Any]], sources: dict[str, Any]) -> list[str]:
+    """Mark values that aren't in their post.
 
     A small model asked to decode or look up a value may write a plausible one instead. Returns those values.
     """
     made_up = []
-    for item in items:
-        source = sources.get(canonical_link(item["links"][0]["url"]))
-        if source is None:
-            continue
-        for link in item["links"][1:]:
-            value = _template_value(link["url"], templates)
-            if value and not contains_words(source["text"], value):
-                link["value_not_found"] = True
-                made_up.append(value)
+    for record in records:
+        source = sources.get(canonical_link(record["links"][0]["url"]))
+        if source is not None and record["fill"] and not contains_words(source["text"], record["fill"]):
+            record["value_not_found"] = True
+            made_up.append(record["fill"])
     return made_up
 
 
@@ -630,7 +630,7 @@ def _fill_pattern(item: dict[str, str], pattern: str) -> dict[str, str]:
 _URL_PATTERN = re.compile(r"(https?://[^\s\"'<>{}\\]+)[<{]")
 
 
-def _find_unsourced_links(items: list[dict[str, Any]], prompt: str, messages: list[dict[str, Any]]) -> list[str]:
+def _find_unsourced_links(records: list[dict[str, Any]], prompt: str, messages: list[dict[str, Any]]) -> list[str]:
     """Mark links that no tool returned and that don't fill in a pattern from the prompt: they may be made up.
 
     A pattern is a URL in the prompt with a placeholder, such as https://example.com/search?q=<name>.
@@ -644,12 +644,12 @@ def _find_unsourced_links(items: list[dict[str, Any]], prompt: str, messages: li
     }
     patterns = [match.group(1).lower() for match in _URL_PATTERN.finditer(prompt)]
     unsourced = []
-    for link in (link for item in items for link in item["links"]):
+    for link in (link for record in records for link in record["links"]):
         filled_in = any(link["url"].lower().startswith(pattern) for pattern in patterns)
         if canonical_link(link["url"]) not in returned and not filled_in:
             link["unsourced"] = True
             unsourced.append(link["url"])
-    return unsourced
+    return list(dict.fromkeys(unsourced))
 
 
 def verify_links(items: list[dict[str, Any]], client: httpx.Client | None = None) -> None:
@@ -659,6 +659,7 @@ def verify_links(items: list[dict[str, Any]], client: httpx.Client | None = None
     "missing" means it did answer 404 or 410, and if a page nearby exists it goes in `closest`: the link
     keeps its own url either way. "unreachable" means no answer, which says nothing about the page.
     Reddit links come from read_subreddit and Reddit allows one request a minute, so they stay unverified.
+    A post with several values has its link in each of their records, and it's only asked for once.
     """
     client = client or httpx.Client(
         follow_redirects=True,
@@ -666,14 +667,18 @@ def verify_links(items: list[dict[str, Any]], client: httpx.Client | None = None
         headers={"User-Agent": "fetcher/0.1"},
         event_hooks={"request": [refuse_non_public_host]},
     )
+    checked: dict[str, dict[str, str]] = {}
     with client:
         for link in (link for item in items for link in item["links"]):
             host = (urlsplit(link["url"]).hostname or "").lower()
             if host == "reddit.com" or host.endswith(".reddit.com"):
                 continue
-            link["check"] = _check_link(client, link["url"])
-            if link["check"] == "missing" and (closest := _closest_existing_page(client, link["url"])):
-                link["closest"] = closest
+            if link["url"] not in checked:
+                found = {"check": _check_link(client, link["url"])}
+                if found["check"] == "missing" and (closest := _closest_existing_page(client, link["url"])):
+                    found["closest"] = closest
+                checked[link["url"]] = found
+            link.update(checked[link["url"]])
 
 
 def _check_link(client: httpx.Client, url: str) -> str:

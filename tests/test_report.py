@@ -1,5 +1,7 @@
+import json
 import os
 import stat
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,7 +11,17 @@ import pytest
 from strands.agent.state import AgentState
 
 from fetcher import tools
-from fetcher.report import LINK_ITEM, SOURCE_ITEM, ReportError, canonical_link, normalize_items, parse_report, report_schema, url_problem
+from fetcher.report import (
+    LINK_ITEM,
+    SOURCE_ITEM,
+    ReportError,
+    canonical_link,
+    combine_values,
+    normalize_items,
+    parse_report,
+    report_schema,
+    url_problem,
+)
 from fetcher.tools import item_contract, link_patterns, report_tool, write_report
 
 POST = "https://www.reddit.com/r/Python/comments/1abc23/switched_to_uv/"
@@ -236,7 +248,7 @@ def test_adapts_the_older_item_shapes():
 
 def test_a_link_beside_fill_is_the_source_in_a_pattern_job():
     item = {"link": POST, "fill": "uv", "description": "d", "quote": "q"}
-    assert parse_report("t", "c", [item], "as_given", SOURCE_ITEM) == ([{"post": POST, "fill": "uv", "description": "d", "quote": "q"}], 1)
+    assert parse_report("t", "c", [item], "as_given", SOURCE_ITEM)[:2] == ([{"post": POST, "fill": "uv", "description": "d", "quote": "q"}], 1)
 
 
 @pytest.mark.parametrize("item", [
@@ -310,7 +322,7 @@ def test_a_missing_link_keeps_its_own_url_beside_the_closest_page_that_exists():
     assert link["url"] == url and link["check"] == "missing"
     assert link["closest"] == "https://example.com/files/"
 
-    html = tools.render_report("t", "p", "c", [{"title": "A", "description": "", "quote": "", **item}], datetime.now())
+    html = tools.render_report("t", "p", "c", [{"title": "A", "fill": None, "evidence": [], **item}], datetime.now())
     assert f'<a href="{url}" rel="noopener noreferrer">l</a> <span class="missing">(not found)</span>' in html
     assert '<a href="https://example.com/files/" rel="noopener noreferrer">closest page that exists</a>' in html
 
@@ -399,7 +411,7 @@ def test_builds_the_second_link_from_the_users_pattern_and_the_value_found(repor
     )
     assert "but" not in result.lower()  # built from the user's pattern, with values that are in the posts
     html = open(result).read()
-    assert '<a href="https://example.org/latest/python3.14/" rel="noopener noreferrer">example.org</a>' in html
+    assert '<a href="https://example.org/latest/python3.14/" rel="noopener noreferrer">3.14</a>' in html  # labelled with its value
     assert 'href="https://example.org/latest/pythonuv%200.9/"' in html
 
 
@@ -429,7 +441,7 @@ def test_leaves_out_items_with_no_value_for_the_users_pattern(report_dir):
     [path] = report_dir.iterdir()
     html = path.read_text()
     assert "A quiet post" in html and "Switched to uv" not in html
-    assert "1 match" in html
+    assert "1 post, 1 value" in html
 
 
 def test_flags_a_filled_value_that_is_not_in_the_post(report_dir):
@@ -474,7 +486,7 @@ def test_a_source_can_be_named_by_its_link_in_a_pattern_job(report_dir):
     assert 'href="https://example.org/search?q=Python"' in path.read_text()
 
 
-def test_merges_items_that_repeat_a_post(report_dir):
+def test_a_post_with_several_values_is_one_entry_with_each_value_in_it(report_dir):
     prompt = "Link each post to https://example.org/search?q=<name>."
     items = [
         {"post": QUIET, "fill": "Python", "description": "d", "quote": "Python 3.14 is out"},
@@ -482,10 +494,228 @@ def test_merges_items_that_repeat_a_post(report_dir):
         {"post": QUIET, "fill": "Python", "description": "d", "quote": "Python 3.14 is out"},
     ]
     result = write_report(title="t", criteria="c", items=items, tool_context=tool_context(prompt))
-    assert "Merged 2 items" in result
+    assert "Dropped 1 exact repeats" in result
     html = open(result.split("Saved ")[1].split(".html")[0] + ".html").read()
     assert html.count("<h3>") == 1
     assert html.count('href="https://example.org/search?q=') == 2  # q=Python and q=quiet, each once
+
+
+PATTERN = "Link each post to https://example.org/search?q=<name>."
+SEARCH = "https://example.org/search?q="
+TWO_VALUES = [
+    {"post": POST, "fill": "uv", "description": "Names the tool.", "quote": "moved to uv"},
+    {"post": POST, "fill": "0.9", "description": "Names the version.", "quote": "uv 0.9 last week"},
+]
+
+
+def saved_report_of(items, prompt=PATTERN, **settings):
+    context = tool_context(prompt, **settings)
+    write_report(title="t", criteria="c", items=items, tool_context=context)
+    report = context.agent.state.get(tools.REPORT)
+    return report, Path(report["path"]).read_text()
+
+
+def matches_in(html):
+    return html.split('<div class="match">')[1:]
+
+
+def test_every_value_keeps_its_own_quote_description_and_link(report_dir):
+    report, html = saved_report_of(TWO_VALUES)
+
+    tool, version = report["items"]
+    assert (tool["post"], tool["fill"], tool["links"][1]["url"]) == (POST, "uv", SEARCH + "uv")
+    assert tool["evidence"] == [{"description": "Names the tool.", "quote": "moved to uv"}]
+    assert (version["fill"], version["links"][1]["url"]) == ("0.9", SEARCH + "0.9")
+    assert version["evidence"] == [{"description": "Names the version.", "quote": "uv 0.9 last week"}]
+
+    first, second = matches_in(html)
+    assert '<p class="value">uv</p>' in first and "Names the tool." in first and "moved to uv" in first and SEARCH + "uv" in first
+    assert '<p class="value">0.9</p>' in second and "Names the version." in second and "uv 0.9 last week" in second and SEARCH + "0.9" in second
+    assert "Names the version." not in first and "Names the tool." not in second
+
+
+def test_a_repeated_post_is_one_entry_and_keeps_each_value(report_dir):
+    report, html = saved_report_of(TWO_VALUES)
+    assert report["counts"] == {"posts": 1, "values": 2, "evidence": 2}
+    assert html.count("<h3>") == 1 and len(matches_in(html)) == 2
+    assert "1 post, 2 values" in html
+
+
+def test_the_same_value_with_another_quote_keeps_both_quotes(report_dir):
+    items = [
+        {"post": POST, "fill": "uv", "description": "In the title.", "quote": "Switched to uv"},
+        {"post": POST, "fill": "uv", "description": "In the body.", "quote": "moved to uv 0.9"},
+    ]
+    report, html = saved_report_of(items)
+
+    [record] = report["items"]
+    assert record["evidence"] == [
+        {"description": "In the title.", "quote": "Switched to uv"},
+        {"description": "In the body.", "quote": "moved to uv 0.9"},
+    ]
+    assert report["counts"] == {"posts": 1, "values": 1, "evidence": 2} and "duplicate_items" not in report["warnings"]
+    [match] = matches_in(html)
+    assert "<blockquote>Switched to uv</blockquote>" in match and "<blockquote>moved to uv 0.9</blockquote>" in match
+    assert match.index("In the title.") < match.index("Switched to uv") < match.index("In the body.") < match.index("moved to uv 0.9")
+
+
+def test_only_an_exact_repeat_is_dropped(report_dir):
+    item = {"post": POST, "fill": "uv", "description": "d", "quote": "moved to uv"}
+    report, _ = saved_report_of([item, item | {}, item | {"description": "Said another way."}])
+
+    assert report["skipped"]["duplicate"] == 1 and "duplicate_items" in report["warnings"]
+    assert report["counts"] == {"posts": 1, "values": 1, "evidence": 2}
+
+
+def test_a_value_that_differs_only_in_case_is_another_value(report_dir):
+    items = [{"post": POST, "fill": fill, "description": "d", "quote": "moved to uv"} for fill in ("uv", "UV")]
+    report, html = saved_report_of(items)
+    assert [record["fill"] for record in report["items"]] == ["uv", "UV"]
+    assert f'href="{SEARCH}uv"' in html and f'href="{SEARCH}UV"' in html
+
+
+def test_a_post_named_by_id_and_by_link_is_one_post(report_dir):
+    context = tool_context(PATTERN)
+    context.agent.state.set(tools.POST_IDS, {"Python-1": POST})
+    items = [TWO_VALUES[0] | {"post": "Python-1"}, TWO_VALUES[1]]
+    write_report(title="t", criteria="c", items=items, tool_context=context)
+    report = context.agent.state.get(tools.REPORT)
+    assert report["counts"]["posts"] == 1 and report["counts"]["values"] == 2
+
+
+def test_plain_link_items_for_one_post_keep_each_second_link_and_quote(report_dir):
+    items = [
+        {"link": POST, "description": "Moved.", "quote": "moved to uv", "extra_link": ARTICLE, "extra_label": "article"},
+        {"link": POST, "description": "Version.", "quote": "uv 0.9", "extra_link": QUIET, "extra_label": "follow-up"},
+        {"link": POST, "description": "Plain.", "quote": "last week"},
+    ]
+    report, html = saved_report_of(items, prompt="Find posts in r/Python about uv")
+    assert report["counts"] == {"posts": 1, "values": 0, "evidence": 3}
+    first, second, third = matches_in(html)
+    assert f'<a href="{ARTICLE}" rel="noopener noreferrer">article</a>' in first and "moved to uv" in first
+    assert f'<a href="{QUIET}" rel="noopener noreferrer">follow-up</a>' in second and "uv 0.9" in second
+    assert "last week" in third
+    assert "3 matches" not in html and "1 match" in html
+
+
+def test_a_second_link_filling_one_of_several_patterns_shows_its_value(report_dir):
+    prompt = "Link https://a.example/<x> or https://b.example/<y>."
+    report, html = saved_report_of([{"link": POST, "description": "d", "extra_link": "https://a.example/uv"}], prompt=prompt)
+    assert report["items"][0]["fill"] == "uv"
+    assert '<p class="value">uv</p>' in html and '<a href="https://a.example/uv" rel="noopener noreferrer">uv</a>' in html
+
+
+def test_a_value_is_shown_as_it_was_given_slashes_and_all(report_dir):
+    context = tool_context(PATTERN)
+    context.agent.state.set(tools.SOURCES, {canonical_link(POST): {"title": "Bands", "text": "AC/DC and Hi / Yo played."}})
+    items = [{"post": POST, "fill": "AC/DC", "description": "d", "quote": "AC/DC"}, {"post": POST, "fill": "Hi / Yo", "description": "d", "quote": "Hi / Yo"}]
+    write_report(title="t", criteria="c", items=items, tool_context=context)
+    report = context.agent.state.get(tools.REPORT)
+
+    assert [record["fill"] for record in report["items"]] == ["AC/DC", "Hi / Yo"]
+    html = Path(report["path"]).read_text()
+    assert f'href="{SEARCH}AC%2FDC"' in html and f'href="{SEARCH}Hi%20%2F%20Yo"' in html
+    assert "value_not_found" not in report["warnings"]
+
+
+def test_two_values_in_one_fill_are_refused_when_they_are_on_two_lines():
+    item = {"post": POST, "fill": "Hi\nYo", "description": "d", "quote": "q"}
+    with pytest.raises(ReportError, match=r"items\[0\]\.fill: expected one value on one line, got 'Hi\\nYo'"):
+        parse_report("t", "c", [item], "as_given", SOURCE_ITEM)
+
+
+def test_everything_submitted_reaches_the_page_and_the_saved_data(report_dir):
+    context = tool_context("Find in r/Python. " + PATTERN, run_id="20261026-131500-a1b2c3", report_json=True)
+    items = [
+        {"post": POST, "fill": "uv", "description": "Names the tool.", "quote": "Switched to uv"},
+        {"post": POST, "fill": "uv", "description": "Used at work.", "quote": "moved to uv 0.9"},
+        {"post": POST, "fill": "0.9", "description": "Names the version.", "quote": "uv 0.9 last week"},
+        {"post": QUIET, "fill": "Python", "description": "Names the language.", "quote": "Python 3.14 is out"},
+        {"post": QUIET, "fill": "3.14", "description": "Names its version.", "quote": "3.14 is out"},
+    ]
+    write_report(title="t", criteria="c", items=items, tool_context=context)
+    report = context.agent.state.get(tools.REPORT)
+    html = Path(report["path"]).read_text()
+    data = json.loads(Path(report["data_path"]).read_text())
+
+    assert data["counts"] == {"posts": 2, "values": 4, "evidence": 5}
+    assert data["items"] == report["items"]
+    pairs = {(record["fill"], evidence["quote"], evidence["description"]) for record in data["items"] for evidence in record["evidence"]}
+    assert pairs == {(item["fill"], item["quote"], item["description"]) for item in items}
+    links = {record["fill"]: record["links"][1]["url"] for record in data["items"]}
+    assert links == {"uv": SEARCH + "uv", "0.9": SEARCH + "0.9", "Python": SEARCH + "Python", "3.14": SEARCH + "3.14"}
+    for item in items:
+        assert f'<p class="value">{item["fill"]}</p>' in html
+        assert f'href="{SEARCH}{item["fill"]}"' in html
+        assert f"<blockquote>{item['quote']}</blockquote>" in html
+        assert item["description"] in html
+
+
+def test_the_saved_data_is_the_records_the_page_was_built_from(report_dir, monkeypatch):
+    rendered = []
+    real_render = tools.render_report
+
+    def spy(title, prompt, criteria, items, *args, **kwargs):
+        rendered.append(deepcopy(items))
+        return real_render(title, prompt, criteria, items, *args, **kwargs)
+
+    monkeypatch.setattr(tools, "render_report", spy)
+    report, _ = saved_report_of(TWO_VALUES, report_json=True)
+    assert rendered == [report["items"]] == [json.loads(Path(report["data_path"]).read_text())["items"]]
+
+
+def test_each_quote_is_flagged_on_its_own(report_dir):
+    items = [{"post": POST, "fill": "uv", "description": "d", "quote": "moved to uv"}, {"post": POST, "fill": "uv", "description": "d", "quote": "made this up"}]
+    report, html = saved_report_of(items)
+    [record] = report["items"]
+    assert [evidence.get("quote_not_found", False) for evidence in record["evidence"]] == [False, True]
+    assert html.count("(not found in the post)") == 1 and "<blockquote>moved to uv</blockquote>" in html
+
+
+def test_a_links_check_is_asked_once_however_many_values_share_it(report_dir, monkeypatch):
+    requested = []
+
+    def fake_web(request):
+        requested.append(str(request.url))
+        return httpx.Response(200)
+
+    items = [{"link": ARTICLE, "description": "One."}, {"link": ARTICLE, "description": "Two.", "extra_link": "https://example.com/b"}]
+    records, _ = combine_values(normalize_items(parse_report("t", "c", items, "as_given", LINK_ITEM)[0]))
+    tools.verify_links(records, httpx.Client(transport=httpx.MockTransport(fake_web)))
+    assert requested == [ARTICLE, "https://example.com/b"]
+    assert [link["check"] for record in records for link in record["links"]] == ["reachable"] * 3
+
+
+NASTY = '"><script>alert(1)</script>'
+
+
+def test_escapes_every_value_and_quote(report_dir):
+    context = tool_context(PATTERN)
+    context.agent.state.set(tools.SOURCES, {canonical_link(POST): {"title": NASTY, "text": f"{NASTY} here"}})
+    items = [{"post": POST, "fill": NASTY, "description": NASTY, "quote": NASTY}]
+    write_report(title=NASTY, criteria=NASTY, items=items, tool_context=context)
+    html = Path(context.agent.state.get(tools.REPORT)["path"]).read_text()
+
+    assert "<script" not in html
+    assert html.count("&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;") >= 5
+    assert f'href="{SEARCH}%22%3E%3Cscript%3Ealert%281%29%3C%2Fscript%3E"' in html  # the link's value, encoded
+
+
+def test_escapes_link_labels_and_attributes(report_dir):
+    url = 'https://example.com/a"onmouseover="alert(1)'
+    items = [{"link": POST, "description": "d", "extra_link": url, "extra_label": NASTY}]
+    _, html = saved_report_of(items, prompt="Find posts in r/Python about uv")
+    assert "onmouseover=\"" not in html and "<script" not in html
+    assert 'href="https://example.com/a&quot;onmouseover=&quot;alert(1)"' in html
+
+
+def test_a_link_from_a_feed_that_is_not_http_is_shown_as_plain_text(report_dir):
+    context = tool_context(PATTERN)
+    bad = "javascript:alert(1)"
+    context.agent.state.set(tools.SOURCES, {canonical_link(bad): {"title": "Click me", "text": "Click me value"}})
+    write_report(title="t", criteria="c", items=[{"post": bad, "fill": "value", "description": "d", "quote": "value"}], tool_context=context)
+    html = Path(context.agent.state.get(tools.REPORT)["path"]).read_text()
+    assert "<h3>Click me</h3>" in html and 'href="javascript' not in html
 
 
 def test_with_several_patterns_the_model_gives_each_second_link(report_dir):
@@ -579,14 +809,15 @@ def test_records_the_saved_report_once_the_file_is_in_place(report_dir):
     items = [{"post": "Python-1", "description": "d"}, {"post": "Python-9", "description": "d"}, {"post": "Python-1", "description": "d"}]
     write_report(title="t", criteria="c", items=items, tool_context=context)
 
-    assert context.agent.state.get(tools.REPORT) == {
-        "schema_version": 1,
+    report = context.agent.state.get(tools.REPORT)
+    assert {key: report[key] for key in ("schema_version", "run_id", "path", "status", "counts", "warnings", "skipped")} == {
+        "schema_version": 2,
         "run_id": "20261026-131500-a1b2c3",
         "path": str(report_dir.resolve() / "20261026-131500-a1b2c3-t.html"),
         "status": "saved",
-        "matches": 1,
-        "warnings": ["unknown_post", "merged_items", "links_not_checked"],
-        "skipped": {"unknown_post": 1, "no_value": 0},
+        "counts": {"posts": 1, "values": 0, "evidence": 1},
+        "warnings": ["unknown_post", "duplicate_items", "links_not_checked"],
+        "skipped": {"unknown_post": 1, "no_value": 0, "duplicate": 1},
     }
 
 
@@ -595,7 +826,7 @@ def test_counts_the_items_left_out_for_having_no_value(report_dir):
     items = [{"post": POST, "fill": "", "description": "d", "quote": "q"}]
     write_report(title="t", criteria="c", items=items, tool_context=context)
     report = context.agent.state.get(tools.REPORT)
-    assert report["skipped"] == {"unknown_post": 0, "no_value": 1} and "no_value" in report["warnings"]
+    assert report["skipped"] == {"unknown_post": 0, "no_value": 1, "duplicate": 0} and "no_value" in report["warnings"]
 
 
 @pytest.mark.parametrize("stage, setup, expected", [

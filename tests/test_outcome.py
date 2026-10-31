@@ -55,7 +55,7 @@ def test_a_question_that_needs_no_report_is_complete_without_one():
 
 
 def test_warnings_about_how_a_report_was_made_do_not_make_it_partial(report):
-    saved = report("merged_items", "legacy_item", "links_not_checked")
+    saved = report("duplicate_items", "legacy_item", "links_not_checked")
     assert job_outcome(state(saved, reads=[READ]), RUN)["outcome"] == "complete"
 
 
@@ -297,7 +297,7 @@ def test_the_trace_ends_with_the_saved_report_and_the_jobs_outcome(run):
     _, _, steps, _ = run(READ_SOURCE, ("read_subreddit", {"subreddit": "golang"}), EMPTY_REPORT, "Done.", flags=["--report-required"])
     [saved] = kinds(steps, "artifact_saved")
     assert saved["status"] == "saved" and saved["warnings"] == ["source_failed", "links_not_checked"]
-    assert saved["schema_version"] == 1
+    assert saved["schema_version"] == 2
 
     assert steps[-1]["kind"] == "job_outcome"
     assert steps[-1]["outcome"] == "partial" and steps[-1]["exit_code"] == 3
@@ -317,10 +317,11 @@ def test_saves_the_reports_data_on_request(run):
     [saved] = kinds(steps, "artifact_saved")
     data = json.loads(Path(saved["data_path"]).read_text())
 
-    assert data["schema_version"] == 1 and data["run_id"] == saved["run_id"] and data["path"] == saved["path"]
+    assert data["schema_version"] == 2 and data["run_id"] == saved["run_id"] and data["path"] == saved["path"]
     assert data["criteria"] == "c" and data["prompt"] == "Find posts in r/learnpython about uv"
     assert data["sources"] == [{"source": "r/learnpython", "status": "complete", "line": "r/learnpython: 1 posts and 2 comments from the last 24 hours."}]
     [entry] = data["items"]
+    assert entry["post"] == "learnpython-1"
     assert entry["title"] == "Question about virtual environments" and entry["comment_count"] == 2
     assert entry["links"][0]["check"] == "unverified"
 

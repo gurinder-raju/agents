@@ -43,6 +43,11 @@ the post and builds the link. Otherwise an item has `post` or `link`, `descripti
 nothing half-right gets saved. `adapt_legacy_item` in [report.py](src/fetcher/report.py) lists the older
 shapes still accepted. Reports are written atomically, so a failed write leaves any earlier report alone.
 
+There's one item per value, and a post can repeat with different values. Each value stays a record of its
+own all the way to the page and the saved data, with its quote, description and links, and its second link
+is labelled with the value. The page shows a post once, with each of its values under it. Rows with the
+same post and value keep all their quotes, and only an exact repeat is dropped.
+
 ### Job outcomes
 
 For a job that has to produce a report, pass `--report-required`. Its instructions then say so. When the

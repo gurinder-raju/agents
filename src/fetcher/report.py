@@ -6,6 +6,10 @@ so every value is escaped and only http(s) links are kept.
 
 What the model sends is checked here first, whole, against one of two flat item contracts. The same
 contract builds the schema the model is shown, so what it's told and what's enforced can't drift apart.
+
+Each match then travels as one record per value, from the tool call to the page and the saved data: which
+post it's from, its value, what was said for it, and its links. Nothing is folded into anything else, so
+what reaches the page is what was sent. Only the page groups records, under their post.
 """
 
 import re
@@ -17,11 +21,12 @@ from urllib.parse import urlsplit
 
 # The shape of what the harness records about a report. It stays out of the tool's arguments: the
 # model says what it found, and the harness keeps its own records.
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
 
 ARGUMENTS = ("title", "criteria", "items", "sort")
 SORTS = ("as_given", "comments")
 _URL_FIELDS = ("link", "extra_link")
+_VALUE_FIELDS = ("fill",)
 
 
 @dataclass(frozen=True)
@@ -53,7 +58,7 @@ SOURCE_ITEM = ItemContract(
         "quote": _QUOTE,
     },
     required=("post", "fill", "description", "quote"),
-    note="Every item has all four.",
+    note="Every item has all four. A post with several values gets one item per value, each with its own quote.",
 )
 
 # For any other job: a post by id, or a feed entry or page by its link, and perhaps a second link.
@@ -72,6 +77,14 @@ LINK_ITEM = ItemContract(
     one_of=("post", "link"),
     note="Every item has post or link, not both.",
 )
+
+def _row_schema(contract: ItemContract) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {name: {"type": "string", "description": text} for name, text in contract.fields.items()},
+        "required": list(contract.required),
+        "additionalProperties": False,
+    }
 
 
 def report_schema(contract: ItemContract) -> dict[str, Any]:
@@ -96,14 +109,7 @@ def report_schema(contract: ItemContract) -> dict[str, Any]:
                     "type": "array",
                     "description": f"One flat object of strings per match, with only these fields: {fields}. "
                     f"{contract.note} description is one sentence on why it matches.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            name: {"type": "string", "description": text} for name, text in contract.fields.items()
-                        },
-                        "required": list(contract.required),
-                        "additionalProperties": False,
-                    },
+                    "items": _row_schema(contract),
                 },
                 "sort": {
                     "type": "string",
@@ -158,8 +164,12 @@ def parse_report(
         errors += _item_errors(f"items[{index}]", item, contract)
     if errors:
         raise ReportError("validation", errors)
-    flat = [{name: value.strip() for name, value in item.items() if value.strip() or name == "fill"} for item, _ in adapted]
+    flat = [_trimmed(item) for item, _ in adapted]
     return flat, sum(changed for _, changed in adapted)
+
+
+def _trimmed(row: dict[str, str]) -> dict[str, str]:
+    return {name: value.strip() for name, value in row.items() if value.strip() or name == "fill"}
 
 
 def _item_errors(path: str, item: Any, contract: ItemContract) -> list[str]:
@@ -178,6 +188,8 @@ def _item_errors(path: str, item: Any, contract: ItemContract) -> list[str]:
         elif value.strip():
             if name in _URL_FIELDS and (problem := url_problem(value.strip())):
                 errors.append(f"{path}.{name}: {problem}")
+            if name in _VALUE_FIELDS and _LINE_BREAK.search(value.strip()):
+                errors.append(f"{path}.{name}: expected one value on one line, got {_shown(value)}")
         elif name in contract.required and name != "fill":  # an empty fill says this post has no value
             errors.append(f"{path}.{name}: expected a non-empty string, got an empty one")
     given = [name for name in contract.one_of if isinstance(item.get(name), str) and item[name].strip()]
@@ -198,6 +210,7 @@ def _shown(value: Any) -> str:
 
 _NOT_IN_A_URL = re.compile(r"[\s\x00-\x1f\x7f]")
 _SECOND_URL = re.compile(r"[,;|]\s*https?://", re.I)
+_LINE_BREAK = re.compile(r"[\r\n]")
 
 
 def url_problem(value: str) -> str | None:
@@ -270,66 +283,94 @@ def trim_sentence_end(url: str) -> str:
 
 
 def normalize_items(items: list[dict[str, str]]) -> list[dict[str, Any]]:
-    """Give each checked item, its source's link now resolved, a title, description, quote and links.
+    """Give each checked row, its source's link now resolved, the record that carries it to the page.
 
-    Each link is {label, url, check}. `check` says what's known of the page over HTTP: nothing yet.
+    `post` is the source as the model named it, and `fill` is its value, or None if the job has none.
+    `evidence` is what was said for it: {description, quote}. Each link is {label, url, check}: links[0]
+    is the post, the rest belong to the value, and `check` says what's known of the page over HTTP: nothing yet.
     """
-    normalized = []
+    records = []
     for item in items:
+        fill = item.get("fill")
         links = [{"label": "post", "url": item["link"], "check": "unverified"}]
         if extra_link := item.get("extra_link"):
-            label = item.get("extra_label") or urlsplit(extra_link).netloc
+            label = item.get("extra_label") or fill or urlsplit(extra_link).netloc
             links.append({"label": label, "url": extra_link, "check": "unverified"})
-        normalized.append({
+        records.append({
+            "post": item.get("post") or item["link"],
             "title": item["link"],
-            "description": item["description"],
-            "quote": item.get("quote", "").strip('"\u201c\u201d'),
+            "fill": fill,
+            "evidence": [{"description": item["description"], "quote": item.get("quote", "").strip('"\u201c\u201d')}],
             "links": links,
         })
-    return normalized
+    return records
 
 
-def match_sources(items: list[dict[str, Any]], sources: dict[str, dict[str, Any]]) -> list[str]:
+def combine_values(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """One record per post and value, keeping everything that was said for it.
+
+    The same post with another value stays a record of its own. The same post and value adds its
+    quote and description to the first, and only an exact repeat of both is dropped. Returns the
+    records and how many exact repeats there were.
+    """
+    combined: dict[tuple[Any, ...], dict[str, Any]] = {}
+    repeats = 0
+    for record in records:
+        page, *own_links = (canonical_link(link["url"]) for link in record["links"])
+        first = combined.setdefault((page, record["fill"], *own_links), record)
+        if first is record:
+            continue
+        for evidence in record["evidence"]:
+            if evidence in first["evidence"]:
+                repeats += 1
+            else:
+                first["evidence"].append(evidence)
+    return list(combined.values()), repeats
+
+
+def match_sources(records: list[dict[str, Any]], sources: dict[str, dict[str, Any]]) -> list[str]:
     """Fill in facts from the posts and pages the tools returned, rather than trusting the model's copy.
 
-    An item that links to a known source takes its title and comment count, and its quote is checked
-    against the source's text. Returns the quotes that weren't found, and marks those items.
+    A record that links to a known source takes its title, short id and comment count, and the groups
+    in it that hold its value. Its quotes are checked against the source's text. Returns the quotes
+    that weren't found, and marks those quotes.
     """
     not_found = []
-    for item in items:
-        keys = (canonical_link(link["url"]) for link in item["links"])
+    for record in records:
+        keys = (canonical_link(link["url"]) for link in record["links"])
         source = next((sources[key] for key in keys if key in sources), None)
         if source is None:
             continue
         if source.get("title"):
-            item["title"] = source["title"]
+            record["title"] = source["title"]
+        if source.get("id"):
+            record["post"] = source["id"]
         if source.get("comment_count") is not None:
-            item["comment_count"] = source["comment_count"]
-        if item["quote"] and not contains_words(source["text"], item["quote"]):
-            item["quote_not_found"] = True
-            not_found.append(item["quote"])
+            record["comment_count"] = source["comment_count"]
+        if record["fill"]:
+            record["groups"] = [group for group in source.get("groups", ()) if contains_words(group["text"], record["fill"])]
+        for evidence in record["evidence"]:
+            if evidence["quote"] and not contains_words(source["text"], evidence["quote"]):
+                evidence["quote_not_found"] = True
+                not_found.append(evidence["quote"])
     return not_found
 
 
-def merge_duplicates(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
-    """One entry per post: items whose first link is the same page become one, keeping every second link.
+def group_by_post(records: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Each post's records together, posts in the order they first come up."""
+    posts: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        posts.setdefault(canonical_link(record["links"][0]["url"]), []).append(record)
+    return list(posts.values())
 
-    Returns the merged items and how many were folded into others.
-    """
-    merged: list[dict[str, Any]] = []
-    by_page: dict[str, dict[str, Any]] = {}
-    for item in items:
-        page = canonical_link(item["links"][0]["url"])
-        first = by_page.get(page)
-        if first is None:
-            by_page[page] = item
-            merged.append(item)
-            continue
-        seen = {canonical_link(link["url"]) for link in first["links"]}
-        first["links"] += [link for link in item["links"][1:] if canonical_link(link["url"]) not in seen]
-        first["quote"] = first["quote"] or item["quote"]
-        first["description"] = first["description"] or item["description"]
-    return merged, len(items) - len(merged)
+
+def count_records(records: list[dict[str, Any]]) -> dict[str, int]:
+    """Three different counts: the posts in a report, the values found in them, and what was said for those."""
+    return {
+        "posts": len(group_by_post(records)),
+        "values": sum(record["fill"] is not None for record in records),
+        "evidence": sum(len(record["evidence"]) for record in records),
+    }
 
 
 def contains_words(text: str, phrase: str) -> bool:
@@ -360,18 +401,18 @@ def render_report(
     notices: list[str] = (),
     empty: str = "Nothing matched the criteria.",
 ) -> str:
-    """Return the report as a complete HTML page. `items` must already be normalized.
+    """Return the report as a complete HTML page. `items` must already be records.
 
     `coverage` has a line per source the tools read, such as how many posts didn't fit. `notices` says
     what makes this a partial report, at the top where it can't be missed. `empty` is what to say if
     there are no items.
     """
     if items:
-        entries = "\n".join(_render_item(item) for item in items)
+        entries = "\n".join(_render_post(post) for post in group_by_post(items))
         body = f'<ol class="items">\n{entries}\n</ol>'
     else:
         body = f'<p class="empty">{escape(empty)}</p>'
-    count = f"{len(items)} {'match' if len(items) == 1 else 'matches'}" + (", most commented first" if by_comments else "")
+    count = _summary(count_records(items)) + (", most commented first" if by_comments else "")
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -403,6 +444,13 @@ def render_report(
 """
 
 
+def _summary(counts: dict[str, int]) -> str:
+    posts, values = counts["posts"], counts["values"]
+    if values:
+        return f"{posts} post{'' if posts == 1 else 's'}, {values} value{'' if values == 1 else 's'}"
+    return f"{posts} {'match' if posts == 1 else 'matches'}"
+
+
 def _render_notices(notices: list[str]) -> str:
     if not notices:
         return ""
@@ -417,34 +465,55 @@ def _render_coverage(coverage: list[str]) -> str:
     return f'\n<h2>Read</h2>\n<ul class="coverage">\n{lines}\n</ul>'
 
 
-def _render_item(item: dict[str, Any]) -> str:
-    links = " · ".join(_render_link(link) for link in item["links"])
-    count = item.get("comment_count")
+def _render_post(records: list[dict[str, Any]]) -> str:
+    first = records[0]
+    post = first["links"][0]
+    count = first.get("comment_count")
     meta = f'\n<p class="meta">{count} comment{"" if count == 1 else "s"}</p>' if count is not None else ""
-    description = f'\n<p class="description">{escape(item["description"])}</p>' if item["description"] else ""
-    quote = ""
-    if item["quote"]:
-        flag = ' <span class="missing">(not found in the post)</span>' if item.get("quote_not_found") else ""
-        quote = f'\n<blockquote>{escape(item["quote"])}{flag}</blockquote>'
+    values = "".join(f"\n{_render_record(record)}" for record in records)
     return f"""<li>
-<h3><a href="{escape(item["links"][0]["url"])}" rel="noopener noreferrer">{escape(item["title"])}</a></h3>{meta}{description}{quote}
-<p class="links">{links}</p>
+<h3>{_anchor(post["url"], first["title"])}</h3>{meta}{values}
+<p class="links">{_render_link(post)}</p>
 </li>"""
 
 
+def _render_record(record: dict[str, Any]) -> str:
+    """One value: the value itself, its own links, and everything said for it."""
+    lines = []
+    if record["fill"] is not None:
+        flag = ' <span class="missing">(value not in the post)</span>' if record.get("value_not_found") else ""
+        lines.append(f'<p class="value">{escape(record["fill"])}{flag}</p>')
+    if own_links := record["links"][1:]:
+        lines.append(f'<p class="links">{" · ".join(_render_link(link) for link in own_links)}</p>')
+    lines += [_render_evidence(evidence) for evidence in record["evidence"]]
+    body = "\n".join(line for line in lines if line)
+    return f'<div class="match">\n{body}\n</div>'
+
+
+def _render_evidence(evidence: dict[str, Any]) -> str:
+    description = f'<p class="description">{escape(evidence["description"])}</p>' if evidence["description"] else ""
+    if not evidence["quote"]:
+        return description
+    flag = ' <span class="missing">(not found in the post)</span>' if evidence.get("quote_not_found") else ""
+    return f'{description}\n<blockquote>{escape(evidence["quote"])}{flag}</blockquote>'.strip()
+
+
 def _render_link(link: dict[str, Any]) -> str:
-    html = f'<a href="{escape(link["url"])}" rel="noopener noreferrer">{escape(link["label"])}</a>'
+    html = _anchor(link["url"], link["label"])
     if link.get("check") == "missing":
         html += ' <span class="missing">(not found)</span>'
     if link.get("closest"):
-        html += f' · <a href="{escape(link["closest"])}" rel="noopener noreferrer">closest page that exists</a>'
+        html += f' · {_anchor(link["closest"], "closest page that exists")}'
     if link.get("check") == "unreachable":
         html += ' <span class="missing">(could not be reached)</span>'
     if link.get("unsourced"):
         html += ' <span class="missing">(no tool returned this link)</span>'
-    if link.get("value_not_found"):
-        html += ' <span class="missing">(value not in the post)</span>'
     return html
+
+
+def _anchor(url: str, text: str) -> str:
+    """A link, unless `url` isn't one: a feed can hand the tools any address it likes, such as javascript:."""
+    return escape(text) if url_problem(url) else f'<a href="{escape(url)}" rel="noopener noreferrer">{escape(text)}</a>'
 
 
 def report_filename(run_id: str, title: str) -> str:
@@ -477,6 +546,8 @@ a { color: var(--link); overflow-wrap: anywhere; }
 .coverage { margin: 0; padding-left: 1.2em; }
 .items li { padding: 14px 0; border-bottom: 1px solid var(--line); }
 .items li:last-child { border-bottom: 0; }
+.match { margin-top: 10px; }
+.value { font-weight: 600; overflow-wrap: anywhere; }
 .links { font-size: 0.9rem; color: var(--muted); }
 .empty { color: var(--muted); }
 blockquote { margin: 6px 0 8px; padding: 2px 0 2px 12px; border-left: 3px solid var(--line); color: var(--muted); }

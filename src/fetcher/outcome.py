@@ -32,7 +32,7 @@ EXIT_CODES = {"complete": 0, "failed": 1, "partial": 3, "report_not_created": 4}
 
 # Warnings that say how a report was made, not what it covers or whether it's right. Any other warning
 # makes a report partial, so a new kind of warning counts unless it's added here.
-NOTES = {"links_not_checked", "merged_items", "legacy_item"}
+NOTES = {"links_not_checked", "duplicate_items", "legacy_item"}
 # What the job's list of reasons already says in words, from the reads themselves.
 _READ_WARNINGS = {"source_failed", "source_incomplete"}
 
