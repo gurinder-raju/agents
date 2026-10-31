@@ -14,6 +14,7 @@ import re
 import socket
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Iterator
@@ -642,13 +643,18 @@ def _closest_existing_page(client: httpx.Client, url: str) -> str | None:
 # the report against it. Strands passes the running agent to tools that have an `agent` parameter.
 SOURCES = "sources"
 
+# Strands runs a reply's tool calls at the same time, and each update below reads the state, changes it
+# and writes it back. Without this, two reads ending together could lose one, and a failed read with it.
+_STATE_LOCK = threading.Lock()
+
 
 def _remember_sources(agent: Any, sources: dict[str | None, dict[str, Any]]) -> None:
     if agent is None:  # called directly, as in the tests
         return
-    known = agent.state.get(SOURCES) or {}
-    known.update({canonical_link(link): source for link, source in sources.items() if link})
-    agent.state.set(SOURCES, known)
+    with _STATE_LOCK:
+        known = agent.state.get(SOURCES) or {}
+        known.update({canonical_link(link): source for link, source in sources.items() if link})
+        agent.state.set(SOURCES, known)
 
 
 # Key in the agent's state for how each read went, by source, so the report says what it covers and an
@@ -670,17 +676,19 @@ POST_IDS = "post_ids"
 def _remember_post_ids(agent: Any, ids: dict[str, str]) -> None:
     if agent is None:
         return
-    agent.state.set(POST_IDS, (agent.state.get(POST_IDS) or {}) | ids)
+    with _STATE_LOCK:
+        agent.state.set(POST_IDS, (agent.state.get(POST_IDS) or {}) | ids)
 
 
 def _remember_coverage(agent: Any, source: str, status: str, line: str) -> None:
     if agent is None:
         return
-    reads = agent.state.get(COVERAGE) or {}
-    earlier = reads.get(source.lower(), {}).get("status")
-    if status == "failed" and earlier in ("complete", "incomplete"):
-        return  # what the earlier read returned still stands
-    agent.state.set(COVERAGE, reads | {source.lower(): {"source": source, "status": status, "line": line}})
+    with _STATE_LOCK:
+        reads = agent.state.get(COVERAGE) or {}
+        earlier = reads.get(source.lower(), {}).get("status")
+        if status == "failed" and earlier in ("complete", "incomplete"):
+            return  # what the earlier read returned still stands
+        agent.state.set(COVERAGE, reads | {source.lower(): {"source": source, "status": status, "line": line}})
 
 
 @contextmanager

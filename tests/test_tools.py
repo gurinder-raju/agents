@@ -1,3 +1,5 @@
+import threading
+import time
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -56,6 +58,26 @@ def test_fetch_url_records_a_page_it_could_not_read():
     with pytest.raises(ValueError, match="non-public address"):
         fetch_url(url="http://localhost:11434/api/tags", agent=agent)
     assert agent.state.get(tools.COVERAGE)["http://localhost:11434/api/tags"]["status"] == "failed"
+
+
+def test_reads_ending_together_are_all_recorded():
+    class SlowState(AgentState):
+        """Leaves room for another thread to read the same value before this one writes it back."""
+
+        def get(self, key=None):
+            value = super().get(key)
+            time.sleep(0.01)
+            return value
+
+    agent = SimpleNamespace(state=SlowState())
+    threads = [
+        threading.Thread(target=tools._remember_coverage, args=(agent, f"r/source{n}", "failed", "line")) for n in range(8)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(agent.state.get(tools.COVERAGE)) == 8
 
 
 def test_find_links_returns_matching_links_in_page_order():

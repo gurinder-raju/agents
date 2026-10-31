@@ -271,8 +271,7 @@ def test_the_advertised_schema_is_the_contract_for_the_job():
 
 def test_schema_versions_and_run_metadata_are_not_arguments():
     for contract in (SOURCE_ITEM, LINK_ITEM):
-        names = str(report_schema(contract)["json"]["properties"].keys())
-        assert names == "dict_keys(['title', 'criteria', 'items', 'sort'])"
+        assert list(report_schema(contract)["json"]["properties"]) == ["title", "criteria", "items", "sort"]
 
 
 def test_a_pattern_at_the_end_of_a_sentence_keeps_its_own_punctuation():
