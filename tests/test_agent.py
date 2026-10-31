@@ -13,6 +13,12 @@ def test_agent_has_the_tools_and_the_skills_tool(tmp_path):
     assert {"current_time", "fetch_url", "read_feed", "read_subreddit", "write_report", "skills"} <= set(agent.tool_registry.registry)
 
 
+def test_the_agents_write_report_shows_the_contract_for_its_prompt(tmp_path):
+    prompt = "Link each post to https://example.org/search?q=<name>."
+    spec = build_agent(TraceRecorder(tmp_path), prompt).tool_registry.registry["write_report"].tool_spec
+    assert "fill" in spec["inputSchema"]["json"]["properties"]["items"]["items"]["required"]
+
+
 def test_reddit_skill_parses(tmp_path):
     skill = Skill.from_file("skills/reddit-new-posts", strict=True)
     assert skill.name == "reddit-new-posts"

@@ -15,7 +15,7 @@ from strands.vended_plugins.skills import AgentSkills
 from .recorder import TraceRecorder
 from .reply_retry import ReplyRetry
 from .skill_redirect import SkillNameRedirect
-from .tools import current_time, fetch_url, read_feed, read_subreddit, write_report
+from .tools import current_time, fetch_url, read_feed, read_subreddit, report_tool
 
 # Generic on purpose. Instructions for a specific job belong in job files under jobs/, which git ignores.
 SYSTEM_PROMPT = """You are a helpful assistant.
@@ -31,7 +31,8 @@ SKILL_DIRS = ["skills", "jobs/skills"]
 LOCAL_TOOL_DIR = Path("jobs/tools")
 
 
-def build_agent(recorder: TraceRecorder) -> Agent:
+def build_agent(recorder: TraceRecorder, prompt: str = "") -> Agent:
+    """Build the agent for one run. `prompt` picks the report items its model is shown: see report_tool."""
     model = OllamaModel(
         host=os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
         # gemma4:e4b made no false matches in a benchmark where gemma4:e2b made one to four a run. It
@@ -53,7 +54,7 @@ def build_agent(recorder: TraceRecorder) -> Agent:
     local_tools, text_transforms = load_local_tools()
     agent = Agent(
         model=model,
-        tools=[current_time, fetch_url, read_feed, read_subreddit, write_report, *local_tools],
+        tools=[current_time, fetch_url, read_feed, read_subreddit, report_tool(prompt), *local_tools],
         system_prompt=SYSTEM_PROMPT,
         # Registered after the recorder, so it runs first after a model call and the trace shows its retries.
         hooks=[recorder, SkillNameRedirect(skills), ReplyRetry()],

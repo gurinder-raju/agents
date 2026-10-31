@@ -3,54 +3,280 @@
 The page is a single HTML file with no scripts and nothing loaded from elsewhere, so it opens
 offline and can be shared as is. Everything in it comes from the model or from strangers' posts,
 so every value is escaped and only http(s) links are kept.
+
+What the model sends is checked here first, whole, against one of two flat item contracts. The same
+contract builds the schema the model is shown, so what it's told and what's enforced can't drift apart.
 """
 
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from html import escape
 from typing import Any
 from urllib.parse import urlsplit
 
+ARGUMENTS = ("title", "criteria", "items", "sort")
+SORTS = ("as_given", "comments")
+_URL_FIELDS = ("link", "extra_link")
 
-def normalize_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Check the model's items and give each one title, description, quote and links: [{label, url}].
 
-    An item gives its links as `link` and an optional `extra_link`. Small models don't always follow
-    the schema exactly, so a `url` or a `links` list of URLs or {label, url} objects works too.
+@dataclass(frozen=True)
+class ItemContract:
+    """The fields of one item in write_report's `items`, each a string and none nested.
+
+    Small models such as gemma4:e2b often close a list nested inside an item with the wrong bracket,
+    and Ollama then can't parse the call and drops it.
     """
+
+    fields: dict[str, str]  # each field's name and what the model puts in it
+    required: tuple[str, ...]
+    one_of: tuple[str, ...] = ()  # an item gives exactly one of these
+    note: str = ""
+
+
+_DESCRIPTION = "One sentence on why it matches."
+_QUOTE = "The exact words from the post or its comments that match, copied word for word."
+
+# For a job whose prompt has one link pattern, such as https://example.com/search?q=<name>. The model
+# names a source and the value it found there, and the code builds both links.
+SOURCE_ITEM = ItemContract(
+    fields={
+        "post": "The post's id from read_subreddit, such as Python-3. For a feed entry or a page, its link "
+        "exactly as your tools returned it.",
+        "fill": "The value you found in this post for the placeholder in the user's link pattern, as it's written "
+        "there. The report builds the link from it. If this post has none, use an empty string: the item is left out.",
+        "description": _DESCRIPTION,
+        "quote": _QUOTE,
+    },
+    required=("post", "fill", "description", "quote"),
+    note="Every item has all four.",
+)
+
+# For any other job: a post by id, or a feed entry or page by its link, and perhaps a second link.
+LINK_ITEM = ItemContract(
+    fields={
+        "post": "For a Reddit post, its id from read_subreddit, such as Python-3. The report builds the post's link "
+        "from it.",
+        "link": "For a feed entry or a page, its link exactly as your tools returned it. One URL.",
+        "description": _DESCRIPTION,
+        "quote": _QUOTE,
+        "extra_link": "Optional: a second link your tools returned, such as the page a link post points to. One URL. "
+        "Never make one up.",
+        "extra_label": 'Optional: one or two words for the second link, such as "download".',
+    },
+    required=("description",),
+    one_of=("post", "link"),
+    note="Every item has post or link, not both.",
+)
+
+
+def report_schema(contract: ItemContract) -> dict[str, Any]:
+    """The input schema write_report advertises for items that follow `contract`.
+
+    Gemma's tool template leaves out any item field called "description", so the prose names the fields too.
+    """
+    fields = ", ".join(contract.fields)
+    return {
+        "json": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": 'Short title for the report, for example "r/Python posts that mention uv".',
+                },
+                "criteria": {
+                    "type": "string",
+                    "description": "In one or two sentences, what made a post or page count as a match.",
+                },
+                "items": {
+                    "type": "array",
+                    "description": f"One flat object of strings per match, with only these fields: {fields}. "
+                    f"{contract.note} description is one sentence on why it matches.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            name: {"type": "string", "description": text} for name, text in contract.fields.items()
+                        },
+                        "required": list(contract.required),
+                        "additionalProperties": False,
+                    },
+                },
+                "sort": {
+                    "type": "string",
+                    "enum": list(SORTS),
+                    "description": '"comments" to list the most commented posts first, or "as_given" to keep your order.',
+                },
+            },
+            "required": ["title", "criteria", "items"],
+            "additionalProperties": False,
+        }
+    }
+
+
+class ReportError(ValueError):
+    """write_report saved nothing. `stage` says which step stopped it, and `errors` lists what went wrong."""
+
+    def __init__(self, stage: str, errors: list[str]) -> None:
+        super().__init__("\n- ".join([f"write_report saved nothing. {_STAGE_ADVICE[stage]}", *errors]))
+        self.stage = stage
+        self.errors = errors
+
+
+_STAGE_ADVICE = {
+    "validation": "Fix all of these and call it again:",
+}
+
+
+def parse_report(
+    title: Any, criteria: Any, items: Any, sort: Any, contract: ItemContract, unknown: list[str] = ()
+) -> tuple[list[dict[str, str]], int]:
+    """Check everything write_report was given, before anything acts on it.
+
+    `unknown` names any arguments the tool doesn't have. Raises ReportError with every problem at once,
+    each with its field's path and the type expected, so one retry can fix them all. Returns the items
+    as trimmed strings, without empty optional fields, and how many had to be adapted from an older shape.
+    """
+    errors = [f"{name}: unknown argument, expected only {', '.join(ARGUMENTS)}" for name in unknown]
+    for name, value in (("title", title), ("criteria", criteria)):
+        if not isinstance(value, str):
+            errors.append(f"{name}: expected a string, got {_kind(value)}")
+        elif not value.strip():
+            errors.append(f"{name}: expected a non-empty string, got an empty one")
+    if not isinstance(sort, str) or sort not in SORTS:
+        errors.append(f"sort: expected one of {', '.join(SORTS)}, got {_shown(sort)}")
+    if not isinstance(items, list):
+        errors.append(f"items: expected a list of objects, got {_kind(items)}")
+        items = []
+    adapted = [adapt_legacy_item(item, contract) for item in items]
+    for index, (item, _) in enumerate(adapted):
+        errors += _item_errors(f"items[{index}]", item, contract)
+    if errors:
+        raise ReportError("validation", errors)
+    flat = [{name: value.strip() for name, value in item.items() if value.strip() or name == "fill"} for item, _ in adapted]
+    return flat, sum(changed for _, changed in adapted)
+
+
+def _item_errors(path: str, item: Any, contract: ItemContract) -> list[str]:
+    listing = ", ".join(contract.fields)
+    if not isinstance(item, dict):
+        return [f"{path}: expected an object with {listing}, got {_kind(item)}"]
+    errors = [f"{path}.{name}: unknown field, expected only {listing}" for name in item if name not in contract.fields]
+    for name in contract.fields:
+        if name not in item:
+            if name in contract.required:
+                errors.append(f"{path}.{name}: missing, expected a string")
+            continue
+        value = item[name]
+        if not isinstance(value, str):
+            errors.append(f"{path}.{name}: expected a string, got {_kind(value)}")
+        elif value.strip():
+            if name in _URL_FIELDS and (problem := url_problem(value.strip())):
+                errors.append(f"{path}.{name}: {problem}")
+        elif name in contract.required and name != "fill":  # an empty fill says this post has no value
+            errors.append(f"{path}.{name}: expected a non-empty string, got an empty one")
+    given = [name for name in contract.one_of if isinstance(item.get(name), str) and item[name].strip()]
+    if contract.one_of and len(given) != 1:
+        errors.append(f"{path}: expected exactly one of {' or '.join(contract.one_of)}, got {len(given)}")
+    return errors
+
+
+def _kind(value: Any) -> str:
+    """How a value looks in JSON, for an error the model can act on."""
+    names = {str: "a string", bool: "true or false", int: "a number", float: "a number", list: "a list", dict: "an object"}
+    return "null" if value is None else names.get(type(value), type(value).__name__)
+
+
+def _shown(value: Any) -> str:
+    return repr(value if len(value) <= 80 else value[:80] + "...") if isinstance(value, str) else _kind(value)
+
+
+_NOT_IN_A_URL = re.compile(r"[\s\x00-\x1f\x7f]")
+_SECOND_URL = re.compile(r"[,;|]\s*https?://", re.I)
+
+
+def url_problem(value: str) -> str | None:
+    """Why `value` isn't one http(s) URL, checked here and now with no network; None if it is one.
+
+    A link field holds a raw URL and is kept as given, so a URL's own punctuation survives: the ")" in
+    https://en.wikipedia.org/wiki/Mercury_(planet) is part of it. Two URLs in one field are refused rather
+    than guessed at, but a URL inside another, as in https://web.archive.org/web/2026/https://example.com/, is fine.
+    """
+    if _NOT_IN_A_URL.search(value) or _SECOND_URL.search(value):
+        return f"expected one URL with no spaces, got {_shown(value)}"
+    try:
+        parts = urlsplit(value)
+        _ = parts.port  # raises if it isn't a number from 0 to 65535
+    except ValueError:
+        parts = None
+    if parts is None or parts.scheme not in ("http", "https") or not parts.hostname:
+        return f"expected an http:// or https:// URL, got {_shown(value)}"
+    return None
+
+
+def adapt_legacy_item(item: Any, contract: ItemContract) -> tuple[Any, bool]:
+    """Turn an item in a shape write_report used to take into `contract`. Returns it and whether it changed.
+
+    Items used to carry their own `title`, which the report now always takes from the source, a `url`, a
+    `links` value of URLs or {label, url} objects, or `link` beside `fill`. Small models still send these
+    now and then, and these items mean what they say, so turning them down would only cost a retry. The
+    result is validated like any other item, and anything else, such as a third link, is left for that to refuse.
+    """
+    if not isinstance(item, dict):
+        return item, False
+    adapted = {name: value for name, value in item.items() if name != "title"}
+    if "url" in adapted and "link" not in adapted:
+        adapted["link"] = adapted.pop("url")
+    if "links" in adapted and "link" not in adapted:
+        links = _legacy_links(adapted["links"])
+        if 1 <= len(links) <= 2:
+            del adapted["links"]
+            adapted["link"] = _legacy_url(links[0])
+            if len(links) == 2:
+                adapted["extra_link"] = _legacy_url(links[1])
+                if isinstance(links[1], dict) and "label" in links[1]:
+                    adapted["extra_label"] = links[1]["label"]
+    if "link" in adapted and "link" not in contract.fields and "post" not in adapted:
+        adapted["post"] = adapted.pop("link")
+    return adapted, adapted != item
+
+
+def _legacy_links(value: Any) -> list[Any]:
+    if isinstance(value, str):
+        return urls_in_text(value) or [value]
+    return [value] if isinstance(value, dict) else value if isinstance(value, list) else []
+
+
+def _legacy_url(link: Any) -> Any:
+    return link.get("url") if isinstance(link, dict) else link
+
+
+def urls_in_text(text: str) -> list[str]:
+    """The URLs written in free text, such as a legacy `links` string. A link field is never read this way."""
+    return [trim_sentence_end(url) for url in re.findall(r"https?://[^\s<>\"']+", text)]
+
+
+def trim_sentence_end(url: str) -> str:
+    """Drop the sentence's punctuation from a URL found in prose, but keep a ")" the URL itself opened."""
+    url = url.rstrip(".,;:")
+    while url.endswith(")") and url.count(")") > url.count("("):
+        url = url[:-1].rstrip(".,;:")
+    return url
+
+
+def normalize_items(items: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """Give each checked item, its source's link now resolved, a title, description, quote and links: [{label, url}]."""
     normalized = []
-    for number, item in enumerate(items, 1):
-        if not isinstance(item, dict):
-            raise ValueError(f"item {number} must be an object with title, description and links")
-        if item.get("link"):
-            raw_links = [{"label": "post", "url": _urls_in(str(item["link"]))[0]}]
-            if item.get("extra_link"):
-                raw_links += [{"label": item.get("extra_label"), "url": url} for url in _urls_in(str(item["extra_link"]))]
-        else:
-            raw_links = item.get("links") or ([item["url"]] if item.get("url") else [])
-        if isinstance(raw_links, (str, dict)):
-            raw_links = [raw_links]
-        links = []
-        for link in raw_links:
-            url = link if isinstance(link, str) else str(link.get("url", ""))
-            label = None if isinstance(link, str) else link.get("label")
-            if urlsplit(url).scheme not in ("http", "https") or not urlsplit(url).netloc:
-                raise ValueError(f"item {number}: {url!r} is not an http:// or https:// link")
-            links.append({"label": str(label or urlsplit(url).netloc), "url": url})
-        if not links:
-            raise ValueError(f"item {number} has no links")
+    for item in items:
+        links = [{"label": "post", "url": item["link"]}]
+        if extra_link := item.get("extra_link"):
+            links.append({"label": item.get("extra_label") or urlsplit(extra_link).netloc, "url": extra_link})
         normalized.append({
-            "title": str(item.get("title") or links[0]["url"]),
-            "description": str(item.get("description") or ""),
-            "quote": str(item.get("quote") or "").strip().strip('"\u201c\u201d'),
+            "title": item["link"],
+            "description": item["description"],
+            "quote": item.get("quote", "").strip('"\u201c\u201d'),
             "links": links,
         })
     return normalized
-
-
-def _urls_in(value: str) -> list[str]:
-    """The URLs in a link field. Small models sometimes put two in one ("https://a/ and https://b/")."""
-    return [url.rstrip(".,)") for url in re.findall(r"https?://[^\s<>\"']+", value)] or [value.strip()]
 
 
 def match_sources(items: list[dict[str, Any]], sources: dict[str, dict[str, Any]]) -> list[str]:

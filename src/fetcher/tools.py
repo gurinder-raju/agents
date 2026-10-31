@@ -17,6 +17,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from copy import copy
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from html import unescape
@@ -31,13 +32,20 @@ import httpx
 from strands import ToolContext, tool
 
 from .report import (
+    ARGUMENTS,
+    LINK_ITEM,
+    SOURCE_ITEM,
+    ItemContract,
     canonical_link,
     contains_words,
     match_sources,
     merge_duplicates,
     normalize_items,
+    parse_report,
     render_report,
     report_filename,
+    report_schema,
+    trim_sentence_end,
 )
 
 # About 3,000 tokens: enough for most articles, small enough for a local model's context window.
@@ -252,11 +260,11 @@ def _linked_url(html: str) -> str | None:
 REPORT_DIR = Path("outputs/reports")
 
 
-# Each item is a flat object of strings. Small models such as gemma4:e2b often close a list nested
-# inside an item with the wrong bracket, and Ollama then can't parse the call and drops it.
-@tool(context=True)
+# Typed Any on purpose: Strands would stop at pydantic's first complaint. parse_report checks the same
+# contract as the schema advertised here, and answers with every problem at once.
+@tool(context=True, inputSchema=report_schema(LINK_ITEM))
 def write_report(
-    title: str, criteria: str, items: list[dict[str, str]], tool_context: ToolContext, sort: str = "as_given"
+    tool_context: ToolContext, title: Any = None, criteria: Any = None, items: Any = None, sort: Any = "as_given"
 ) -> str:
     """Save the matches as an HTML report and return the file's path.
 
@@ -264,41 +272,30 @@ def write_report(
     once, at the end, with every match. If nothing matched, still call it, with an empty list: the
     report shows the user what was checked. It takes each post's title and comment count from the
     post itself, and checks your quotes and links.
-
-    Args:
-        title: Short title for the report, for example "r/Python posts that mention uv".
-        criteria: In one or two sentences, what made a post or page count as a match.
-        items: One object per match, with these fields:
-            post: for a Reddit post, its id from read_subreddit, such as Python-3. The report builds
-                the post's link from it.
-            link: for a feed entry or a page, its link exactly as your tools returned it.
-            description: one sentence on why it matches.
-            quote: the exact words from the post or its comments that match, copied word for word.
-            fill: if the user gave a link pattern with a placeholder, such as
-                https://example.com/search?q=<name>, the value you found for the placeholder in this
-                post, such as a name. The report builds the second link from it. Give one in every
-                item: items without a value are left out of the report.
-            extra_link: otherwise, an optional second link your tools returned, such as the page a
-                link post points to. Never make one up.
-            extra_label: one or two words for the second link, such as "download".
-        sort: "comments" to list the most commented posts first, or "as_given" to keep your order.
     """
-    if sort not in ("as_given", "comments"):
-        raise ValueError('sort must be "as_given" or "comments"')
     agent = tool_context.agent
     prompt = _user_prompt(agent.messages)
     sources = agent.state.get(SOURCES) or {}
-    templates = [template.rstrip(".,;:)") for template in _URL_TEMPLATE.findall(prompt)]
-    resolved = [_resolve_post(item, agent.state.get(POST_IDS) or {}, sources) for item in items]
-    unknown_posts = [problem for item, problem in resolved if problem]
-    items = normalize_items([_fill_template(item, templates) for item, problem in resolved if not problem])
-    items, merged = merge_duplicates(items)
+    templates = link_patterns(prompt)
+    contract = item_contract(prompt)
+    unknown = [name for name in tool_context.tool_use.get("input", {}) if name not in ARGUMENTS]
+    flat_items, adapted = parse_report(title, criteria, items, sort, contract, unknown)
+
+    post_ids = agent.state.get(POST_IDS) or {}
+    kept = []
+    unknown_posts = []
     without_value = 0
-    if len(templates) == 1:
-        # The user asked for a link built from a value found in each post; an item without one has
-        # nothing to show, so it stays out of the report.
-        without_value = sum(1 for item in items if len(item["links"]) < 2)
-        items = [item for item in items if len(item["links"]) >= 2]
+    for item in flat_items:
+        resolved = _resolve_source(item, post_ids, sources)
+        if resolved is None:
+            unknown_posts.append(item["post"])
+        elif contract is LINK_ITEM:
+            kept.append(resolved)
+        elif item["fill"]:
+            kept.append(_fill_pattern(resolved, templates[0]))
+        else:  # the user asked for a link built from a value in each post, and this post has none
+            without_value += 1
+    items, merged = merge_duplicates(normalize_items(kept))
     unmatched_quotes = match_sources(items, sources)
     made_up_values = _check_filled_values(items, templates, sources)
     unverified = _find_unverified_links(items, prompt, agent.messages)
@@ -323,6 +320,8 @@ def write_report(
         note += f" Merged {merged} items that repeated a post into the first item for that post."
     if without_value:
         note += f" Left out {without_value} items with no value for the link pattern the user gave."
+    if adapted:
+        note += f" Read {adapted} items in an older shape; next time use only the fields this tool lists."
     problems = []
     if unknown_posts:
         problems.append(f"these post ids aren't from read_subreddit, so those items were left out: {', '.join(unknown_posts)}")
@@ -351,30 +350,44 @@ _PLACEHOLDER = re.compile(r"<[^<>]+>|\{[^{}]+\}")
 _REDDIT_POST = re.compile(r"/r/(\w+)/comments/\w+/([^/?#]+)", re.I)
 
 
-def _resolve_post(item: Any, post_ids: dict[str, str], sources: dict[str, Any]) -> tuple[Any, str | None]:
-    """Turn an item's post id into the post's link, and fix a Reddit link whose id the model mangled.
+def link_patterns(prompt: str) -> list[str]:
+    """The URLs in the prompt with a placeholder, such as https://example.com/search?q=<name>."""
+    return [trim_sentence_end(pattern) for pattern in _URL_TEMPLATE.findall(prompt)]
 
-    Returns the item and, for a post id read_subreddit never handed out, that id as a problem.
+
+def item_contract(prompt: str) -> ItemContract:
+    """The contract for this prompt's items. With several patterns the model gives each extra_link itself."""
+    return SOURCE_ITEM if len(link_patterns(prompt)) == 1 else LINK_ITEM
+
+
+def report_tool(prompt: str) -> Any:
+    """write_report as this job's model sees it: the schema of the one contract parse_report will enforce."""
+    job_tool = copy(write_report)
+    job_tool.tool_spec = write_report.tool_spec | {"inputSchema": report_schema(item_contract(prompt))}
+    return job_tool
+
+
+def _resolve_source(item: dict[str, str], post_ids: dict[str, str], sources: dict[str, Any]) -> dict[str, str] | None:
+    """Give an item its source's link, and fix a Reddit link whose id the model mangled.
+
+    Small models mangle long URLs, so the model can name a source by its short id instead. Returns None
+    for a `post` that no read tool handed out. A `link` stays as it is, for the provenance check to judge.
     """
-    if not isinstance(item, dict):
-        return item, None
-    post = str(item.get("post") or "").strip()
-    if post:
-        link = next((link for post_id, link in post_ids.items() if post_id.lower() == post.lower()), None)
-        if link:
-            return item | {"link": link}, None
-        if not item.get("link"):
-            return item, post
-    link = str(item.get("link") or "")
-    wanted = _REDDIT_POST.search(link)
-    if wanted and canonical_link(link) not in sources:
+    named = item.get("post") or item["link"]
+    by_id = next((link for post_id, link in post_ids.items() if post_id.lower() == named.lower()), None)
+    if by_id:
+        return item | {"link": by_id}
+    if canonical_link(named) in sources:
+        return item | {"link": named}
+    wanted = _REDDIT_POST.search(named)
+    if wanted:
         # Same subreddit and same title words in the link: the post the model meant, if only one matches.
         same = [known for known in post_ids.values()
                 if (m := _REDDIT_POST.search(known)) and m.group(1).lower() == wanted.group(1).lower()
                 and m.group(2).lower() == wanted.group(2).lower()]
         if len(same) == 1:
-            return item | {"link": same[0]}, None
-    return item, None
+            return item | {"link": same[0]}
+    return None if "post" in item else item
 
 
 def _check_filled_values(items: list[dict[str, Any]], templates: list[str], sources: dict[str, Any]) -> list[str]:
@@ -405,31 +418,15 @@ def _template_value(url: str, templates: list[str]) -> str | None:
     return None
 
 
-def _fill_template(item: Any, templates: list[str]) -> Any:
+def _fill_pattern(item: dict[str, str], pattern: str) -> dict[str, str]:
     """Build an item's second link from the user's link pattern and the value the model found for it.
 
     The model only has to find the value; a small model often mangles a URL it writes itself, for
-    example python<version> as python315. With more than one pattern, the model gives extra_link instead.
-    A small model also often leaves fill out and puts the value in quote; a quote short enough to be a
-    single value, such as a name or an id, stands in for it. _check_filled_values still checks it.
+    example python<version> as python315.
     """
-    if not isinstance(item, dict) or len(templates) != 1:
-        return item
-    value = str(item.get("fill") or "").strip()
-    if not value and not item.get("extra_link"):
-        value = _single_value(str(item.get("quote") or ""))
-    if not value:
-        return item
-    return item | {"extra_link": _PLACEHOLDER.sub(lambda _: quote(value, safe=""), templates[0], count=1)}
+    return item | {"extra_link": _PLACEHOLDER.sub(lambda _: quote(item["fill"], safe=""), pattern, count=1)}
 
 
-def _single_value(text: str) -> str:
-    """The text, if it's short enough to be one value (at most 60 characters and 4 words), without
-    quotation marks or a [label: ...] wrapper; otherwise nothing."""
-    text = text.strip().strip('"\u201c\u201d')
-    if wrapped := re.fullmatch(r"\[\w+: (.+)\]", text):
-        text = wrapped.group(1).strip()
-    return text if 0 < len(text) <= 60 and len(text.split()) <= 4 else ""
 # The part of a URL before a placeholder such as <name> or {name}.
 _URL_PATTERN = re.compile(r"(https?://[^\s\"'<>{}\\]+)[<{]")
 

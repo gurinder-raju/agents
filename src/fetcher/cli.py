@@ -13,7 +13,7 @@ def main() -> None:
     args = parser.parse_args()
 
     recorder = TraceRecorder(args.trace_dir)
-    agent = build_agent(recorder)
+    agent = build_agent(recorder, args.prompt)
     try:
         # Strands' default callback handler streams the reply to the terminal. invocation_state reaches
         # tools that ask for a ToolContext: write_report names its file after the run.
