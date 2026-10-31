@@ -171,7 +171,7 @@ def test_every_problem_comes_back_at_once_with_its_path_and_expected_type():
 
     assert caught.value.stage == "validation"
     assert caught.value.errors == [
-        "version: unknown argument, expected only title, criteria, items, sort",
+        "version: unknown argument, expected only title, criteria, items, sort, left_out",
         "title: expected a string, got null",
         "criteria: expected a string, got a number",
         "sort: expected one of as_given, comments, got 'newest'",
@@ -233,7 +233,7 @@ def test_refuses_anything_but_one_http_url(value):
 
 
 def test_adapts_the_older_item_shapes():
-    items, adapted = parse_report("t", "c", [
+    items, adapted, _ = parse_report("t", "c", [
         {"title": "A title the model made up", "url": POST, "description": "d"},
         {"links": [POST, {"label": "docs", "url": ARTICLE}], "description": "d"},
         {"links": f"See {POST} and {ARTICLE}.", "description": "d"},
@@ -283,7 +283,7 @@ def test_the_advertised_schema_is_the_contract_for_the_job():
 
 def test_schema_versions_and_run_metadata_are_not_arguments():
     for contract in (SOURCE_ITEM, LINK_ITEM):
-        assert list(report_schema(contract)["json"]["properties"]) == ["title", "criteria", "items", "sort"]
+        assert list(report_schema(contract)["json"]["properties"]) == ["title", "criteria", "items", "sort", "left_out"]
 
 
 def test_a_pattern_at_the_end_of_a_sentence_keeps_its_own_punctuation():
@@ -440,8 +440,9 @@ def test_leaves_out_items_with_no_value_for_the_users_pattern(report_dir):
     assert "Left out 1 items with no value" in result
     [path] = report_dir.iterdir()
     html = path.read_text()
-    assert "A quiet post" in html and "Switched to uv" not in html
+    assert "A quiet post" in html
     assert "1 post, 1 value" in html
+    assert 'Switched to uv</a>: No name in this one.' in html  # under Left out, with what the model said about it
 
 
 def test_flags_a_filled_value_that_is_not_in_the_post(report_dir):
@@ -689,15 +690,16 @@ def test_a_links_check_is_asked_once_however_many_values_share_it(report_dir, mo
 NASTY = '"><script>alert(1)</script>'
 
 
-def test_escapes_every_value_and_quote(report_dir):
+def test_escapes_every_value_quote_label_and_reason(report_dir):
     context = tool_context(PATTERN)
     context.agent.state.set(tools.SOURCES, {canonical_link(POST): {"title": NASTY, "text": f"{NASTY} here"}})
     items = [{"post": POST, "fill": NASTY, "description": NASTY, "quote": NASTY}]
-    write_report(title=NASTY, criteria=NASTY, items=items, tool_context=context)
+    left_out = [{"source": POST, "value": NASTY, "reason": NASTY}, {"source": NASTY, "reason": NASTY}]
+    write_report(title=NASTY, criteria=NASTY, items=items, left_out=left_out, tool_context=context)
     html = Path(context.agent.state.get(tools.REPORT)["path"]).read_text()
 
     assert "<script" not in html
-    assert html.count("&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;") >= 5
+    assert html.count("&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;") >= 8
     assert f'href="{SEARCH}%22%3E%3Cscript%3Ealert%281%29%3C%2Fscript%3E"' in html  # the link's value, encoded
 
 

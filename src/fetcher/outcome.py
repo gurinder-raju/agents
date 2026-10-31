@@ -8,14 +8,18 @@ The policy for partial reports:
 - A call that fails validation saves nothing. The model gets every problem back and can call again.
 - A valid call is always saved, whatever else is wrong, because some of the answer beats none of it.
   The report says at the top what makes it partial, and write_report tells the model.
-- It's partial if a source failed or was cut short, if no source was read, if an item was left out, or
-  if something in it couldn't be confirmed: see NOTES for the only warnings that don't count.
-- An empty report is a complete answer only if every source was read in full. Otherwise it says
-  that nothing matched in what could be read, or that nothing could be.
+- It's partial if a source failed or was cut short, if no source was read, if an item couldn't be
+  placed, if something in it couldn't be confirmed, or if anything the model read has no explanation:
+  see NOTES for the only warnings that don't count.
+- Leaving something out is fine if it's explained. Everything found has to end up on the page or with
+  a reason, as accounting.py sets out, and a requested source that wasn't read needs a reason too.
+- An empty report is a complete answer only if every source was read in full and everything in them
+  is explained. Otherwise it says that nothing matched in what could be read, or that nothing could be.
 
 A job that needs a report says so with --report-required. Its instructions then ask for one. When the
-agent returns, the command line looks for this run's file, and if it isn't there, asks the model once
-more to finish. If it's still not there, the job's outcome is report_not_created.
+agent returns, the command line looks for this run's file, and if it isn't there, or it leaves
+something unexplained, asks the model once more to finish. If the file's still not there, the job's
+outcome is report_not_created. If it's there but still doesn't explain everything, the job is partial.
 """
 
 from typing import Any
@@ -26,23 +30,38 @@ FINISH_REPORT = (
     "The job isn't finished: no report has been saved, and a list in your reply doesn't count. Call write_report "
     "now with title, criteria and items, one item per match, or an empty items list if nothing matched."
 )
+FINISH_ACCOUNTING = (
+    "The job isn't finished: the report doesn't say what became of everything you read. Call write_report again with "
+    "the same title and every item you sent before, and add left_out rows saying why the rest aren't items. One row "
+    "with a source's name covers all the rest of its posts, and a value needs a row of its own. These have no item "
+    "or left_out row:"
+)
 
 # 2 is taken: argparse exits with it when it can't read the command line.
 EXIT_CODES = {"complete": 0, "failed": 1, "partial": 3, "report_not_created": 4}
 
 # Warnings that say how a report was made, not what it covers or whether it's right. Any other warning
-# makes a report partial, so a new kind of warning counts unless it's added here.
-NOTES = {"links_not_checked", "duplicate_items", "legacy_item"}
+# makes a report partial, so a new kind of warning counts unless it's added here. no_value is here
+# because an empty fill is an explicit answer about that post, like a left_out row.
+NOTES = {"links_not_checked", "duplicate_items", "legacy_item", "no_value"}
 # What the job's list of reasons already says in words, from the reads themselves.
 _READ_WARNINGS = {"source_failed", "source_incomplete"}
 
 
+def report_finished(state: Any, run_id: str) -> bool:
+    """Whether this run saved its report, and that report explains everything left out of it."""
+    report = saved_report(state, run_id)
+    return report is not None and not report.get("unexplained")
+
+
 def finalization_request(state: Any) -> str:
-    """What to tell a model that stopped without saving the report, including why its last call didn't."""
+    """What to tell a model that hasn't finished the report, including why its last call didn't."""
+    unexplained = (state.get(REPORT) or {}).get("unexplained")
+    request = "\n- ".join([FINISH_ACCOUNTING, *unexplained]) if unexplained else FINISH_REPORT
     failure = state.get(REPORT_FAILURE)
     if failure is None:
-        return FINISH_REPORT
-    return "\n- ".join([f"{FINISH_REPORT}\nThe last call saved nothing, because of these:", *failure["errors"]])
+        return request
+    return "\n- ".join([f"{request}\nThe last call saved nothing, because of these:", *failure["errors"]])
 
 
 def job_outcome(state: Any, run_id: str, report_required: bool = False, error: Exception | None = None) -> dict[str, Any]:

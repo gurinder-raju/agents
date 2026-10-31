@@ -33,6 +33,7 @@ from zoneinfo import ZoneInfo
 import httpx
 from strands import ToolContext, tool
 
+from .accounting import account_sources, accounting_lines, source_key
 from .report import (
     ARGUMENTS,
     LINK_ITEM,
@@ -360,18 +361,21 @@ REPORT_DIR = Path("outputs/reports")
 # contract as the schema advertised here, and answers with every problem at once.
 @tool(context=True, inputSchema=report_schema(LINK_ITEM))
 def write_report(
-    tool_context: ToolContext, title: Any = None, criteria: Any = None, items: Any = None, sort: Any = "as_given"
+    tool_context: ToolContext, title: Any = None, criteria: Any = None, items: Any = None, sort: Any = "as_given", left_out: Any = ()
 ) -> str:
     """Save the matches as an HTML report and return the file's path.
 
-    The report shows the user's prompt word for word, your criteria, and one entry per match. Call it
-    once, at the end, with every match. If nothing matched, still call it, with an empty list: the
-    report shows the user what was checked. It takes each post's title and comment count from the
-    post itself, and checks your quotes and links.
+    The report shows the user's prompt word for word, your criteria, and every match under its post.
+    Call it once, at the end, with one item per match. If a post has several values, give each one its
+    own item with its own quote. If nothing matched, still call it, with an empty list: the report
+    shows the user what was checked. Use left_out to say why whatever you read isn't in items: a row
+    with a source's name covers the rest of its posts, and each value you saw and aren't reporting
+    needs its own row. The report takes each post's title and comment count from the post itself,
+    and checks your quotes and links.
     """
     agent = tool_context.agent
     try:
-        record, reply = _save_report(title, criteria, items, sort, tool_context)
+        record, reply = _save_report(title, criteria, items, sort, left_out, tool_context)
     except ReportError as error:
         _progress(f"write_report: {error.stage} failed")
         agent.state.set(REPORT_FAILURE, {"stage": error.stage, "errors": error.errors})
@@ -381,17 +385,20 @@ def write_report(
     return reply
 
 
-def _save_report(title: Any, criteria: Any, items: Any, sort: Any, tool_context: ToolContext) -> tuple[dict[str, Any], str]:
-    """Validate, resolve, check, render and save, in that order. Returns the report's record and the reply to the model."""
+def _save_report(
+    title: Any, criteria: Any, items: Any, sort: Any, left_out: Any, tool_context: ToolContext
+) -> tuple[dict[str, Any], str]:
+    """Validate, resolve, check, account, render and save, in that order. Returns the report's record and the reply to the model."""
     agent = tool_context.agent
     settings = tool_context.invocation_state
     prompt = _user_prompt(agent.messages)
     sources = agent.state.get(SOURCES) or {}
+    post_ids = agent.state.get(POST_IDS) or {}
     templates = link_patterns(prompt)
     unknown = [name for name in tool_context.tool_use.get("input", {}) if name not in ARGUMENTS]
-    rows, adapted = parse_report(title, criteria, items, sort, item_contract(prompt), unknown)
+    rows, adapted, left_out = parse_report(title, criteria, items, sort, item_contract(prompt), unknown, left_out)
 
-    kept, unknown_posts, without_value = _resolve_items(rows, templates, agent.state.get(POST_IDS) or {}, sources)
+    kept, unknown_posts, without_value = _resolve_items(rows, templates, post_ids, sources)
     records, repeats = combine_values(normalize_items(kept))
     unmatched_quotes = match_sources(records, sources)
     made_up_values = _check_filled_values(records, sources)
@@ -403,9 +410,13 @@ def _save_report(title: Any, criteria: Any, items: Any, sort: Any, tool_context:
     if sort == "comments":
         records.sort(key=lambda record: record.get("comment_count", -1), reverse=True)
 
-    problems = _problems(records, unknown_posts, made_up_values, unmatched_quotes, unsourced)
-    left_out = f"Left out {len(without_value)} items with no value for the link pattern the user gave." if without_value else ""
     reads = list((agent.state.get(COVERAGE) or {}).values())
+    requested = requested_sources(prompt)
+    names = {source_key(name) for name in [*requested, *(read["source"] for read in reads)]}
+    left_out = _place_left_out(left_out, names, post_ids, sources) + [_no_value_row(row, sources) for row in without_value]
+    ledger = account_sources(requested, reads, sources, records, left_out, bool(templates))
+
+    problems = _problems(records, unknown_posts, made_up_values, unmatched_quotes, unsourced) | _accounting_problems(ledger, left_out)
     gaps = [read["line"] for read in reads if read["status"] != "complete"]
     other_warnings = {
         "no_value": without_value,
@@ -418,13 +429,14 @@ def _save_report(title: Any, criteria: Any, items: Any, sort: Any, tool_context:
     }
     warnings = [*problems, *(code for code, found in other_warnings.items() if found)]
     notices = gaps + [f"{sentence[0].upper()}{sentence[1:]}." for sentence in problems.values()]
-    notices += ([left_out] if left_out else []) + ([] if reads else ["No source was read."])
+    notices += [] if reads else ["No source was read."]
 
     created = datetime.now().astimezone()
-    coverage = [read["line"] for read in reads] + ([] if verified else ["Links were not checked over the network."])
+    coverage = [read["line"] for read in reads] + accounting_lines(ledger) + ([] if verified else ["Links were not checked over the network."])
     try:
         html = render_report(
-            title, prompt, criteria, records, created, coverage, by_comments=sort == "comments", notices=notices, empty=_nothing_found(reads)
+            title, prompt, criteria, records, created, coverage, by_comments=sort == "comments", notices=notices,
+            empty=_nothing_found(ledger), left_out=left_out,
         )
     except Exception as error:  # a bug in rendering, which the model can't fix by sending the items again
         raise ReportError("render", [repr(error)]) from error
@@ -441,6 +453,9 @@ def _save_report(title: Any, criteria: Any, items: Any, sort: Any, tool_context:
         "counts": count_records(records),
         "warnings": warnings,
         "skipped": {"unknown_post": len(unknown_posts), "no_value": len(without_value), "duplicate": repeats},
+        "unexplained": _unexplained(ledger),
+        "sources": ledger,
+        "left_out": left_out,
         "items": records,
     }
     try:
@@ -450,23 +465,25 @@ def _save_report(title: Any, criteria: Any, items: Any, sort: Any, tool_context:
             data = path.with_suffix(".json")
             record["data_path"] = str(data.resolve())
             details = {"title": title, "prompt": prompt, "criteria": criteria, "created": created.isoformat(timespec="seconds")}
-            _save_atomically(data, json.dumps(record | details | {"sources": reads}, ensure_ascii=False, indent=2))
+            _save_atomically(data, json.dumps(record | details, ensure_ascii=False, indent=2))
         _save_atomically(path, html)
     except OSError as error:
         raise ReportError("write", [str(error)]) from error
     _progress(f"write_report: saved {path}")
 
-    note = f" {left_out}" if left_out else ""
+    note = f" Left out {len(without_value)} items with no value for the link pattern the user gave." if without_value else ""
     if repeats:
         note += f" Dropped {repeats} exact repeats of an item."
     if adapted:
         note += f" Read {adapted} items in an older shape; next time use only the fields this tool lists."
     if gaps or not reads:
         note += f" It's marked partial because not everything was read: {' '.join(gaps) or 'no source was read.'} Say so in your reply."
+    if "unaccounted_candidates" in problems:
+        note += " One left_out row with a source's name covers all the rest of its posts."
     if problems:
         return record, (
-            f"Saved {path.resolve()}, but {'; and '.join(problems.values())}. Fix those items or leave them out, then "
-            f"call write_report again with the same title to replace the report.{note}"
+            f"Saved {path.resolve()}, but {'; and '.join(problems.values())}. Fix those, then call write_report again "
+            f"with the same title and every item to replace the report.{note}"
         )
     return record, f"Saved {path.resolve()}.{note}" if note else str(path.resolve())
 
@@ -492,6 +509,32 @@ def _resolve_items(
     return kept, unknown_posts, without_value
 
 
+def _place_left_out(
+    rows: list[dict[str, str]], names: set[str], post_ids: dict[str, str], sources: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Work out what each left_out row is about. `scope` is "source", "post", or None if it's nothing the tools read."""
+    placed = []
+    for row in rows:
+        key = source_key(row["source"])
+        if key in names:
+            placed.append(row | {"scope": "source", "key": key})
+        elif resolved := _resolve_source({"post": row["source"]}, post_ids, sources):
+            placed.append(row | _post_row(resolved["link"], sources))
+        else:
+            placed.append(row | {"scope": None})
+    return placed
+
+
+def _post_row(link: str, sources: dict[str, Any]) -> dict[str, Any]:
+    key = canonical_link(link)
+    return {"scope": "post", "key": key, "link": link, "title": sources.get(key, {}).get("title")}
+
+
+def _no_value_row(item: dict[str, str], sources: dict[str, Any]) -> dict[str, Any]:
+    """An item with an empty fill is the model saying what became of that post, like a left_out row."""
+    return {"source": item["post"], "reason": item["description"], "no_value": True} | _post_row(item["link"], sources)
+
+
 def _problems(
     records: list[dict[str, Any]], unknown_posts: list[str], made_up_values: list[str], unmatched_quotes: list[str], unsourced: list[str]
 ) -> dict[str, str]:
@@ -510,17 +553,52 @@ def _problems(
     return {code: sentence for code, (found, sentence) in checks.items() if found}
 
 
+def _accounting_problems(ledger: list[dict[str, Any]], left_out: list[dict[str, Any]]) -> dict[str, str]:
+    """What the report doesn't explain, as warning codes and sentences. Input that was cut off isn't here: its read says so."""
+    posts, groups, not_read = _unaccounted(ledger)
+    strays = [row["source"] for row in left_out if row["scope"] is None]
+    checks = {
+        "unaccounted_candidates": (posts, f"no item or left_out row covers these posts: {'; '.join(posts)}"),
+        "unaccounted_values": (groups, f"no item or left_out row covers these values: {'; '.join(groups)}"),
+        "source_not_read": (not_read, f"these sources were asked for but not read, and no left_out row says why: {', '.join(not_read)}"),
+        "unknown_left_out": (strays, f"these left_out rows don't name a source or post your tools read: {', '.join(strays)}"),
+    }
+    return {code: sentence for code, (found, sentence) in checks.items() if found}
+
+
+# Enough names to act on. A source's left_out row covers all its posts, however many there are.
+MAX_NAMES = 12
+
+
+def _unaccounted(ledger: list[dict[str, Any]]) -> tuple[list[str], list[str], list[str]]:
+    """What nothing explains: each source's posts, then each group, then the sources asked for and never read."""
+    posts = []
+    for row in ledger:
+        names = row["unaccounted"]["posts"]
+        if names:
+            more = f" and {len(names) - MAX_NAMES} more" if len(names) > MAX_NAMES else ""
+            posts.append(f"{row['source']}: {', '.join(names[:MAX_NAMES])}{more}")
+    groups = [group for row in ledger for group in row["unaccounted"]["groups"]]
+    not_read = [row["source"] for row in ledger if row["status"] == "not_read" and not row["reason"]]
+    return posts, groups, not_read
+
+
+def _unexplained(ledger: list[dict[str, Any]]) -> list[str]:
+    posts, groups, not_read = _unaccounted(ledger)
+    return posts + groups + [f"{source}: not read" for source in not_read]
+
+
 def saved_report(state: Any, run_id: str) -> dict[str, Any] | None:
     """The report this run saved, going by the record write_report left, if its file is really there."""
     report = state.get(REPORT)
     return report if report and report["run_id"] == run_id and Path(report["path"]).is_file() else None
 
 
-def _nothing_found(reads: list[dict[str, str]]) -> str:
+def _nothing_found(ledger: list[dict[str, Any]]) -> str:
     """What an empty report says, which only means nothing matched if the sources were all read."""
-    if not reads or all(read["status"] == "failed" for read in reads):
+    if all(row["status"] in ("failed", "not_read") for row in ledger):
         return "No source could be read, so nothing was checked."
-    if all(read["status"] == "complete" for read in reads):
+    if all(row["status"] == "complete" for row in ledger):
         return "Nothing matched the criteria."
     return "Nothing matched in what could be read."
 
@@ -556,6 +634,21 @@ _REDDIT_POST = re.compile(r"/r/(\w+)/comments/\w+/([^/?#]+)", re.I)
 def link_patterns(prompt: str) -> list[str]:
     """The URLs in the prompt with a placeholder, such as https://example.com/search?q=<name>."""
     return [trim_sentence_end(pattern) for pattern in _URL_TEMPLATE.findall(prompt)]
+
+
+_SUBREDDIT_IN_URL = re.compile(r"reddit\.com/r/(\w+)", re.I)
+_SUBREDDIT_IN_TEXT = re.compile(r"(?<!\w)r/([A-Za-z0-9_]{2,21})(?!\w)", re.I)
+
+
+def requested_sources(prompt: str) -> list[str]:
+    """The sources the prompt names: its subreddits, and any URL in it that isn't a link pattern.
+
+    It can only go by what's written, so a URL given as background counts too. A left_out row saying so settles that.
+    """
+    text = _URL_TEMPLATE.sub(" ", prompt)
+    urls = [trim_sentence_end(url) for url in _URL.findall(text)]
+    in_urls = [f"r/{match.group(1)}" if (match := _SUBREDDIT_IN_URL.search(url)) else url for url in urls]
+    return [*in_urls, *(f"r/{name}" for name in _SUBREDDIT_IN_TEXT.findall(_URL.sub(" ", text)))]
 
 
 def item_contract(prompt: str) -> ItemContract:

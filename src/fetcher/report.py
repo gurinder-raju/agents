@@ -23,10 +23,10 @@ from urllib.parse import urlsplit
 # model says what it found, and the harness keeps its own records.
 REPORT_SCHEMA_VERSION = 2
 
-ARGUMENTS = ("title", "criteria", "items", "sort")
+ARGUMENTS = ("title", "criteria", "items", "sort", "left_out")
 SORTS = ("as_given", "comments")
 _URL_FIELDS = ("link", "extra_link")
-_VALUE_FIELDS = ("fill",)
+_VALUE_FIELDS = ("fill", "value")
 
 
 @dataclass(frozen=True)
@@ -78,6 +78,20 @@ LINK_ITEM = ItemContract(
     note="Every item has post or link, not both.",
 )
 
+# One row for whatever the model read and isn't reporting, so that leaving something out is a decision
+# with a reason, not a silence. See accounting.py.
+LEFT_OUT = ItemContract(
+    fields={
+        "source": "What you're leaving out: a source you read, such as r/Python, for the rest of its posts, or "
+        "one post's id or link.",
+        "value": "Only for one value you saw in that post and aren't reporting, as it's written there. Leave it out "
+        "for a whole post or source.",
+        "reason": "One sentence on why it isn't in items.",
+    },
+    required=("source", "reason"),
+)
+
+
 def _row_schema(contract: ItemContract) -> dict[str, Any]:
     return {
         "type": "object",
@@ -116,6 +130,13 @@ def report_schema(contract: ItemContract) -> dict[str, Any]:
                     "enum": list(SORTS),
                     "description": '"comments" to list the most commented posts first, or "as_given" to keep your order.',
                 },
+                "left_out": {
+                    "type": "array",
+                    "description": "Why whatever you read isn't in items, as flat objects of strings with only these "
+                    f"fields: {', '.join(LEFT_OUT.fields)}. One row naming a source covers the rest of its posts. A value "
+                    "you saw and aren't reporting needs a row of its own, with its post as source.",
+                    "items": _row_schema(LEFT_OUT),
+                },
             },
             "required": ["title", "criteria", "items"],
             "additionalProperties": False,
@@ -140,13 +161,14 @@ _STAGE_ADVICE = {
 
 
 def parse_report(
-    title: Any, criteria: Any, items: Any, sort: Any, contract: ItemContract, unknown: list[str] = ()
-) -> tuple[list[dict[str, str]], int]:
+    title: Any, criteria: Any, items: Any, sort: Any, contract: ItemContract, unknown: list[str] = (), left_out: Any = ()
+) -> tuple[list[dict[str, str]], int, list[dict[str, str]]]:
     """Check everything write_report was given, before anything acts on it.
 
     `unknown` names any arguments the tool doesn't have. Raises ReportError with every problem at once,
     each with its field's path and the type expected, so one retry can fix them all. Returns the items
-    as trimmed strings, without empty optional fields, and how many had to be adapted from an older shape.
+    as trimmed strings, without empty optional fields, how many had to be adapted from an older shape,
+    and the left_out rows, trimmed the same way.
     """
     errors = [f"{name}: unknown argument, expected only {', '.join(ARGUMENTS)}" for name in unknown]
     for name, value in (("title", title), ("criteria", criteria)):
@@ -162,10 +184,15 @@ def parse_report(
     adapted = [adapt_legacy_item(item, contract) for item in items]
     for index, (item, _) in enumerate(adapted):
         errors += _item_errors(f"items[{index}]", item, contract)
+    if not isinstance(left_out, list | tuple):
+        errors.append(f"left_out: expected a list of objects, got {_kind(left_out)}")
+        left_out = []
+    for index, row in enumerate(left_out):
+        errors += _item_errors(f"left_out[{index}]", row, LEFT_OUT)
     if errors:
         raise ReportError("validation", errors)
     flat = [_trimmed(item) for item, _ in adapted]
-    return flat, sum(changed for _, changed in adapted)
+    return flat, sum(changed for _, changed in adapted), [_trimmed(row) for row in left_out]
 
 
 def _trimmed(row: dict[str, str]) -> dict[str, str]:
@@ -400,12 +427,13 @@ def render_report(
     by_comments: bool = False,
     notices: list[str] = (),
     empty: str = "Nothing matched the criteria.",
+    left_out: list[dict[str, Any]] = (),
 ) -> str:
     """Return the report as a complete HTML page. `items` must already be records.
 
     `coverage` has a line per source the tools read, such as how many posts didn't fit. `notices` says
     what makes this a partial report, at the top where it can't be missed. `empty` is what to say if
-    there are no items.
+    there are no items. `left_out` has the rows that say why something isn't in the report.
     """
     if items:
         entries = "\n".join(_render_post(post) for post in group_by_post(items))
@@ -437,7 +465,7 @@ def render_report(
 <section>
 <h2>Links</h2>
 {body}
-</section>
+</section>{_render_left_out(left_out)}
 </main>
 </body>
 </html>
@@ -463,6 +491,19 @@ def _render_coverage(coverage: list[str]) -> str:
         return ""
     lines = "\n".join(f"<li>{escape(line)}</li>" for line in coverage)
     return f'\n<h2>Read</h2>\n<ul class="coverage">\n{lines}\n</ul>'
+
+
+def _render_left_out(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return ""
+    lines = "\n".join(f"<li>{_render_left_out_row(row)}</li>" for row in rows)
+    return f'\n<section>\n<h2>Left out</h2>\n<ul class="coverage">\n{lines}\n</ul>\n</section>'
+
+
+def _render_left_out_row(row: dict[str, Any]) -> str:
+    name = _anchor(row["link"], row.get("title") or row["source"]) if row.get("link") else escape(row["source"])
+    value = f' <span class="value">{escape(row["value"])}</span>' if row.get("value") else ""
+    return f"{name}{value}: {escape(row['reason'])}"
 
 
 def _render_post(records: list[dict[str, Any]]) -> str:

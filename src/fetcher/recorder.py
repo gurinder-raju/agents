@@ -2,7 +2,8 @@
 
 Strands calls these hooks as its agent loop runs, so the trace shows the order things happen in:
 the prompt arriving, each model call and what came back, each tool call and its result, and the end.
-After write_report it adds what became of the report, and the command line adds the job's outcome.
+After write_report it adds what became of the report, with the records and counts behind it, and the
+command line adds the job's outcome.
 """
 
 import json

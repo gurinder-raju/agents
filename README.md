@@ -48,30 +48,41 @@ own all the way to the page and the saved data, with its quote, description and 
 is labelled with the value. The page shows a post once, with each of its values under it. Rows with the
 same post and value keep all their quotes, and only an exact repeat is dropped.
 
+`left_out` says why whatever the model read isn't in `items`: a row with a source's name covers the rest of
+its posts, a row with a post's id covers that post, and a row with `value` as well covers that value.
+
 ### Job outcomes
 
 For a job that has to produce a report, pass `--report-required`. Its instructions then say so. When the
-agent returns, the command line looks for this run's file, and if it isn't there, asks the model once more
-to finish. The exit status tells a script what happened:
+agent returns, the command line looks for this run's file, and if it isn't there, or it leaves something
+the model read unexplained, asks the model once more to finish. The exit status tells a script what happened:
 
 | Exit | Outcome | Meaning |
 | --- | --- | --- |
-| 0 | `complete` | Everything was read and nothing's in doubt. Zero matches counts. |
+| 0 | `complete` | Everything was read and explained, and nothing's in doubt. Zero matches counts. |
 | 1 | `failed` | The run stopped, or none of its sources could be read. A report may still have been saved. |
 | 2 | | The command line itself was wrong. |
 | 3 | `partial` | The report was saved, but something is incomplete or unconfirmed. It says what at the top. |
 | 4 | `report_not_created` | The job needed a report, and this run's file isn't there. |
 
-A report is partial if a source failed or was cut short, if no source was read, if an item was left out, or
-if a quote, value or link couldn't be confirmed. A valid call is always saved, and the report says what's
-missing; [outcome.py](src/fetcher/outcome.py) holds this policy. An empty report only says nothing matched
-if everything was read.
+A report is partial if a source failed or was cut short, if no source was read, if an item couldn't be
+placed, if a quote, value or link couldn't be confirmed, or if something the model read has no explanation.
+A valid call is always saved, and the report says what's missing; [outcome.py](src/fetcher/outcome.py) holds
+this policy. An empty report only says nothing matched if everything was read and explained.
+
+Every source gets a row of counts: what was found in it, cut off before the model read it, assessed,
+submitted, rejected, rendered and left unaccounted, for its posts and for any groups a local tool marked in
+them. Everything found ends up as exactly one of rendered, rejected, truncated or unaccounted, as
+[accounting.py](src/fetcher/accounting.py) sets out. The sources are the ones the prompt names and the
+ones the model read. Input that was cut off is the source's to report, and the model doesn't have to explain it.
 
 `--no-verify-links` skips the one step that uses the network, so a report can be built and rendered
 offline. With checks on, each link ends up `reachable`, `missing` (the host answered 404 or 410) or
 `unreachable` (no answer), and Reddit's stay `unverified`. A missing link keeps its URL, with the closest
 page that exists beside it. `--report-json` also saves the report's data as JSON next to its HTML, for
-anything downstream that wants the items rather than the page.
+anything downstream that wants the items rather than the page: the same per-value records the page was
+built from, each source's counts, the `left_out` rows, and separate counts of posts, values and evidence.
+`schema_version` says which shape that is, and it's kept in the harness's records, not the tool's arguments.
 
 Without logging in, Reddit allows about one request a minute. `read_subreddit` reads the post list and
 then the subreddit's comment feed, 100 comments a request, so a day of a subreddit takes a minute or
@@ -79,5 +90,5 @@ two. Agents running at once on one machine take turns with each host, so they do
 other's budget.
 
 Each run writes its steps to `traces/<run_id>.jsonl`: every model call, each tool result with the tool the
-model asked for and the one that ran, `artifact_saved` or `artifact_failed` after `write_report`, and a final
-`job_outcome`. Set `AGENT_MODEL` to try another Ollama model, and `OLLAMA_HOST` if Ollama isn't on `localhost:11434`.
+model asked for and the one that ran, `artifact_saved` (with the same records as `--report-json`) or
+`artifact_failed` after `write_report`, and a final `job_outcome`. Set `AGENT_MODEL` to try another Ollama model, and `OLLAMA_HOST` if Ollama isn't on `localhost:11434`.

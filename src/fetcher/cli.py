@@ -5,9 +5,8 @@ import sys
 import traceback
 
 from .agent import build_agent, unload_model
-from .outcome import finalization_request, job_outcome
+from .outcome import finalization_request, job_outcome, report_finished
 from .recorder import TraceRecorder
-from .tools import saved_report
 
 
 def main() -> int:
@@ -35,8 +34,8 @@ def main() -> int:
     try:
         # Strands' default callback handler streams the reply to the terminal.
         agent(args.prompt, invocation_state=settings)
-        if args.report_required and saved_report(agent.state, recorder.run_id) is None:
-            print("no report saved; asking the model to finish it", file=sys.stderr, flush=True)
+        if args.report_required and not report_finished(agent.state, recorder.run_id):
+            print("the report isn't finished; asking the model to finish it", file=sys.stderr, flush=True)
             agent(finalization_request(agent.state), invocation_state=settings)
     except Exception as failure:  # the outcome below reports it
         traceback.print_exc()
