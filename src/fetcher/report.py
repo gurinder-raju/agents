@@ -124,6 +124,8 @@ class ReportError(ValueError):
 
 _STAGE_ADVICE = {
     "validation": "Fix all of these and call it again:",
+    "render": "It could not be rendered, which sending it again won't change. Tell the user:",
+    "write": "The file could not be written, which you can't fix. Tell the user:",
 }
 
 

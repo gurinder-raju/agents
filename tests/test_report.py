@@ -1,3 +1,5 @@
+import os
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -415,6 +417,74 @@ def test_with_several_patterns_the_model_gives_each_second_link(report_dir):
     write_report(title="t", criteria="c", items=items, tool_context=tool_context(prompt))
     [path] = report_dir.iterdir()
     assert 'href="https://a.example/v"' in path.read_text()
+
+
+def test_saves_utf8_in_a_temporary_file_beside_the_report_then_moves_it_into_place(report_dir, monkeypatch):
+    replaced = []
+    real_replace = os.replace
+
+    def spy(source, destination):
+        replaced.append((Path(source), Path(destination), Path(source).read_bytes()))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(tools.os, "replace", spy)
+    path = write_report(title="Café 🐍", criteria="naïve \ud83d", items=[], tool_context=tool_context(run_id="20261026-131500-a1b2c3"))
+
+    [(temporary, destination, written)] = replaced
+    assert temporary.parent == destination.parent == report_dir and temporary.name.endswith(".tmp")
+    assert destination == Path(path) == report_dir / "20261026-131500-a1b2c3-caf.html"
+    assert "Café 🐍".encode() in written and b"na\xc3\xafve ?" in written  # half a surrogate pair can't be encoded
+    assert Path(path).read_bytes() == written
+    assert [entry.name for entry in report_dir.iterdir()] == [destination.name]
+
+
+def test_a_saved_report_gets_the_usual_permissions(report_dir):
+    previous = os.umask(0o022)
+    try:
+        path = write_report(title="t", criteria="c", items=[], tool_context=tool_context())
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o644
+
+
+def test_creates_the_report_folder(report_dir, monkeypatch):
+    monkeypatch.setattr(tools, "REPORT_DIR", report_dir / "new" / "reports")
+    path = write_report(title="t", criteria="c", items=[], tool_context=tool_context())
+    assert Path(path).parent == report_dir / "new" / "reports"
+
+
+def test_a_failed_write_keeps_the_earlier_report_and_leaves_no_temporary_file(report_dir, monkeypatch):
+    path = write_report(title="t", criteria="first", items=[], tool_context=tool_context(run_id="20261026-131500-a1b2c3"))
+
+    def out_of_space(source, destination):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(tools.os, "replace", out_of_space)
+    with pytest.raises(ReportError, match="No space left") as caught:
+        write_report(title="t", criteria="second", items=[], tool_context=tool_context(run_id="20261026-131500-a1b2c3"))
+
+    assert caught.value.stage == "write"
+    assert [entry.name for entry in report_dir.iterdir()] == [Path(path).name]
+    assert "first" in Path(path).read_text()
+
+
+def test_a_report_folder_that_can_not_be_made_is_a_write_failure(report_dir, monkeypatch):
+    (report_dir / "taken").write_text("a file, where the folder should go")
+    monkeypatch.setattr(tools, "REPORT_DIR", report_dir / "taken" / "reports")
+    with pytest.raises(ReportError) as caught:
+        write_report(title="t", criteria="c", items=[], tool_context=tool_context())
+    assert caught.value.stage == "write"
+
+
+def test_a_failed_render_is_told_apart_from_a_failed_write(report_dir, monkeypatch):
+    def broken(*args, **kwargs):
+        raise KeyError("title")
+
+    monkeypatch.setattr(tools, "render_report", broken)
+    with pytest.raises(ReportError, match="could not be rendered") as caught:
+        write_report(title="t", criteria="c", items=[], tool_context=tool_context())
+    assert caught.value.stage == "render"
+    assert list(report_dir.iterdir()) == []
 
 
 def test_says_what_the_tools_read(report_dir):

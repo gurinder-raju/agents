@@ -9,6 +9,7 @@ If a tool raises, Strands sends the error message back as the result instead, so
 import fcntl
 import ipaddress
 import json
+import os
 import re
 import socket
 import sys
@@ -36,6 +37,7 @@ from .report import (
     LINK_ITEM,
     SOURCE_ITEM,
     ItemContract,
+    ReportError,
     canonical_link,
     contains_words,
     match_sources,
@@ -305,13 +307,18 @@ def write_report(
 
     created = datetime.now().astimezone()
     coverage = agent.state.get(COVERAGE) or []
-    html = render_report(title, prompt, criteria, items, created, coverage, by_comments=sort == "comments")
+    try:
+        html = render_report(title, prompt, criteria, items, created, coverage, by_comments=sort == "comments")
+    except Exception as error:  # a bug in rendering, which the model can't fix by sending the items again
+        raise ReportError("render", [repr(error)]) from error
     # The CLI passes the trace's run id, so a report and its trace share a name. Several agents can run
     # at once in one folder, so without one, a random suffix keeps their reports apart.
     run_id = tool_context.invocation_state.get("run_id") or created.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
     path = REPORT_DIR / report_filename(run_id, title)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(html)
+    try:
+        _save_atomically(path, html)
+    except OSError as error:
+        raise ReportError("write", [str(error)]) from error
     _progress(f"write_report: saved {path}")
 
     replaced = [f"{link['closest_to']} -> {link['url']}" for item in items for link in item["links"] if "closest_to" in link]
@@ -339,6 +346,25 @@ def write_report(
             f"call write_report again with the same title to replace the report.{note}"
         )
     return f"Saved {path.resolve()}.{note}" if note else str(path.resolve())
+
+
+def _save_atomically(path: Path, text: str) -> None:
+    """Save text as UTF-8, so that `path` only ever holds a whole file, and a failure leaves what was there.
+
+    The text goes to a temporary file beside `path`, then moves into place in one step. A retry replaces
+    an earlier report the same way. Text a model sent can hold half of a surrogate pair, which UTF-8 can't
+    encode; that character becomes a "?" rather than costing the whole report.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex[:6]}.tmp")
+    try:
+        with open(temporary, "xb") as file:  # unlike mkstemp, this gives the file the usual permissions
+            file.write(text.encode("utf-8", "replace"))
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 _URL = re.compile(r"https?://[^\s\"'<>\\]+")
