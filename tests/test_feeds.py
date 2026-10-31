@@ -1,9 +1,11 @@
 import fcntl
 import json
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import httpx
 import pytest
+from strands.agent.state import AgentState
 
 from fetcher import tools
 from fetcher.tools import parse_feed, read_feed
@@ -64,6 +66,25 @@ def test_read_feed_keeps_only_recent_entries(monkeypatch):
     result = json.loads(read_feed(url="https://www.reddit.com/r/learnpython/new/.rss", since_hours=24))
     assert [e["id"] for e in result["entries"]] == ["t3_1abc23"]
     assert result["omitted"] == 0
+
+
+def test_read_feed_records_how_the_read_went(monkeypatch):
+    monkeypatch.setattr(tools, "http_get", lambda url: httpx.Response(200, text=ATOM))
+    agent = SimpleNamespace(state=AgentState())
+    read_feed(url="https://example.com/feed", agent=agent)
+    read_feed(url="https://example.com/short-feed", max_entries=1, agent=agent)
+
+    complete, cut_short = agent.state.get(tools.COVERAGE).values()
+    assert complete["status"] == "complete" and complete["line"] == "newest submissions : learnpython: 2 entries."
+    assert cut_short["status"] == "incomplete" and cut_short["line"].endswith("1 entries, and 1 more that were left out.")
+
+
+def test_read_feed_records_a_feed_it_could_not_parse(monkeypatch):
+    monkeypatch.setattr(tools, "http_get", lambda url: httpx.Response(200, text="<html></html>"))
+    agent = SimpleNamespace(state=AgentState())
+    with pytest.raises(ValueError, match="not an RSS or Atom feed"):
+        read_feed(url="https://example.com/feed", agent=agent)
+    assert agent.state.get(tools.COVERAGE)["https://example.com/feed"]["status"] == "failed"
 
 
 def test_rate_limits_are_shared_through_a_file_per_host(tmp_path, monkeypatch):

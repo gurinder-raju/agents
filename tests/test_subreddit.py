@@ -155,7 +155,84 @@ def test_says_what_it_read_and_keeps_real_characters(fake_reddit):
     result = read_subreddit(subreddit="learnpython", agent=agent)
 
     assert "🐍" in result  # not \\ud83d\\udc0d, which the model would copy into its quotes
-    assert agent.state.get(tools.COVERAGE) == ["r/learnpython: 1 posts and 2 comments from the last 24 hours."]
+    assert agent.state.get(tools.COVERAGE) == {
+        "r/learnpython": {"source": "r/learnpython", "status": "complete", "line": "r/learnpython: 1 posts and 2 comments from the last 24 hours."},
+    }
+
+
+def status_after_reading(**settings):
+    agent = SimpleNamespace(state=AgentState())
+    read_subreddit(subreddit="learnpython", agent=agent, **settings)
+    return agent.state.get(tools.COVERAGE)["r/learnpython"]
+
+
+def test_a_read_that_stopped_at_the_comment_page_limit_is_incomplete(fake_reddit, monkeypatch):
+    monkeypatch.setattr(tools, "MAX_COMMENT_PAGES", 1)
+    fake_reddit.pages[COMMENTS_URL] = comment_feed(*(comment(f"p{n}", "1abc23", "/u/busy", "Hi.", 0.5) for n in range(100)))
+    read = status_after_reading()
+    assert read["status"] == "incomplete" and "Comment counts may be low" in read["line"]
+
+
+def test_a_read_that_did_not_fit_is_incomplete(fake_reddit, monkeypatch):
+    full_size = len(read_subreddit(subreddit="learnpython"))
+    monkeypatch.setattr(tools, "MIN_COMMENTS_PER_POST", 1)
+    monkeypatch.setattr(tools, "MAX_SUBREDDIT_CHARS", full_size - 1)
+    read = status_after_reading()
+    assert read["status"] == "incomplete" and "didn't fit" in read["line"]
+
+
+def test_a_full_listing_of_recent_posts_may_have_stopped_short_of_the_window(fake_reddit, monkeypatch):
+    monkeypatch.setattr(tools, "LISTING_POSTS", 1)
+    fake_reddit.pages[LISTING_URL.replace("limit=100", "limit=1")] = ATOM.split("<entry>")[0] + "<entry>" + ATOM.split("<entry>")[1] + "</feed>"
+    read = status_after_reading()
+    assert read["status"] == "incomplete" and "stopped at 1 posts" in read["line"]
+
+
+def test_a_full_listing_that_reaches_older_posts_covers_the_window(fake_reddit, monkeypatch):
+    monkeypatch.setattr(tools, "LISTING_POSTS", 2)
+    fake_reddit.pages[LISTING_URL.replace("limit=100", "limit=2")] = ATOM
+    assert status_after_reading()["status"] == "complete"
+
+
+def test_a_failed_read_is_recorded_and_still_raised(fake_reddit):
+    del fake_reddit.pages[LISTING_URL]
+    agent = SimpleNamespace(state=AgentState())
+    with pytest.raises(AssertionError, match="unexpected request"):
+        read_subreddit(subreddit="learnpython", agent=agent)
+    read = agent.state.get(tools.COVERAGE)["r/learnpython"]
+    assert read["status"] == "failed" and "could not be read" in read["line"]
+
+
+def test_a_failure_while_reading_comments_is_a_failed_read(fake_reddit):
+    del fake_reddit.pages[COMMENTS_URL]
+    agent = SimpleNamespace(state=AgentState())
+    with pytest.raises(AssertionError):
+        read_subreddit(subreddit="learnpython", agent=agent)
+    assert agent.state.get(tools.COVERAGE)["r/learnpython"]["status"] == "failed"
+
+
+def test_a_bad_subreddit_name_is_the_models_mistake_not_a_failed_read(fake_reddit):
+    agent = SimpleNamespace(state=AgentState())
+    with pytest.raises(ValueError, match="not a valid subreddit name"):
+        read_subreddit(subreddit="learnpython and rust", agent=agent)
+    assert agent.state.get(tools.COVERAGE) is None
+
+
+def test_a_retry_that_works_replaces_the_failure(fake_reddit):
+    agent = SimpleNamespace(state=AgentState())
+    with pytest.raises(AssertionError):
+        read_subreddit(subreddit="LearnPython", agent=agent)  # the fake Reddit doesn't know this spelling
+    read_subreddit(subreddit="learnpython", agent=agent)
+    assert [read["status"] for read in agent.state.get(tools.COVERAGE).values()] == ["complete"]
+
+
+def test_a_failed_retry_does_not_undo_what_an_earlier_read_returned(fake_reddit):
+    agent = SimpleNamespace(state=AgentState())
+    read_subreddit(subreddit="learnpython", agent=agent)
+    del fake_reddit.pages[LISTING_URL]
+    with pytest.raises(AssertionError):
+        read_subreddit(subreddit="learnpython", agent=agent)
+    assert agent.state.get(tools.COVERAGE)["r/learnpython"]["status"] == "complete"
 
 
 def test_numbers_posts_and_runs_local_text_transforms(fake_reddit):

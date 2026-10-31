@@ -15,6 +15,10 @@ from html import escape
 from typing import Any
 from urllib.parse import urlsplit
 
+# The shape of what the harness records about a report. It stays out of the tool's arguments: the
+# model says what it found, and the harness keeps its own records.
+REPORT_SCHEMA_VERSION = 1
+
 ARGUMENTS = ("title", "criteria", "items", "sort")
 SORTS = ("as_given", "comments")
 _URL_FIELDS = ("link", "extra_link")
@@ -353,16 +357,20 @@ def render_report(
     created: datetime,
     coverage: list[str] = (),
     by_comments: bool = False,
+    notices: list[str] = (),
+    empty: str = "Nothing matched the criteria.",
 ) -> str:
     """Return the report as a complete HTML page. `items` must already be normalized.
 
-    `coverage` has a line per source the tools read, such as how many posts didn't fit.
+    `coverage` has a line per source the tools read, such as how many posts didn't fit. `notices` says
+    what makes this a partial report, at the top where it can't be missed. `empty` is what to say if
+    there are no items.
     """
     if items:
         entries = "\n".join(_render_item(item) for item in items)
         body = f'<ol class="items">\n{entries}\n</ol>'
     else:
-        body = '<p class="empty">Nothing matched the criteria.</p>'
+        body = f'<p class="empty">{escape(empty)}</p>'
     count = f"{len(items)} {'match' if len(items) == 1 else 'matches'}" + (", most commented first" if by_comments else "")
     return f"""<!doctype html>
 <html lang="en">
@@ -378,7 +386,7 @@ def render_report(
 <header>
 <h1>{escape(title)}</h1>
 <p class="meta">{escape(created.strftime("%Y-%m-%d %H:%M %Z").strip())} · {count}</p>
-</header>
+</header>{_render_notices(notices)}
 <section class="brief">
 <h2>Prompt</h2>
 <p class="prompt">{escape(prompt)}</p>
@@ -393,6 +401,13 @@ def render_report(
 </body>
 </html>
 """
+
+
+def _render_notices(notices: list[str]) -> str:
+    if not notices:
+        return ""
+    lines = "\n".join(f"<li>{escape(line)}</li>" for line in notices)
+    return f'\n<section class="partial">\n<h2>Partial report</h2>\n<ul class="coverage">\n{lines}\n</ul>\n</section>'
 
 
 def _render_coverage(coverage: list[str]) -> str:
@@ -455,6 +470,8 @@ a { color: var(--link); overflow-wrap: anywhere; }
 .meta { color: var(--muted); font-size: 0.9rem; }
 .brief { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 4px 16px 12px; margin-top: 24px; }
 .brief h2:first-child { margin-top: 14px; }
+.partial { border: 1px solid #b3261e; border-radius: 8px; padding: 4px 16px 12px; margin-top: 24px; }
+.partial h2 { color: #b3261e; margin-top: 14px; }
 .prompt { white-space: pre-wrap; }
 .items { padding-left: 1.4em; margin: 0; }
 .coverage { margin: 0; padding-left: 1.2em; }

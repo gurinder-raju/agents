@@ -1,7 +1,11 @@
 from datetime import datetime
+from types import SimpleNamespace
 
+import httpx
 import pytest
+from strands.agent.state import AgentState
 
+from fetcher import tools
 from fetcher.tools import current_time, fetch_url, find_links, html_to_text
 
 
@@ -30,6 +34,27 @@ def test_fetch_url_refuses_this_machine():
 def test_fetch_url_refuses_other_schemes():
     with pytest.raises(ValueError, match="http"):
         fetch_url(url="file:///etc/passwd")
+
+
+def test_fetch_url_records_how_the_read_went(monkeypatch):
+    pages = {"https://example.com/short": "Short page.", "https://example.com/long": "x" * (tools.MAX_PAGE_CHARS + 1)}
+    monkeypatch.setattr(tools, "http_get", lambda url: httpx.Response(200, text=pages[url], request=httpx.Request("GET", url)))
+    agent = SimpleNamespace(state=AgentState())
+    for url in pages:
+        fetch_url(url=url, agent=agent)
+    fetch_url(url="https://example.com/short", links="words", agent=agent)
+    coverage = agent.state.get(tools.COVERAGE)
+
+    assert coverage["https://example.com/short"]["status"] == "complete"
+    assert coverage["https://example.com/long"]["status"] == "incomplete"
+    assert coverage["https://example.com/long"]["line"].endswith(f"read the first {tools.MAX_PAGE_CHARS} of {tools.MAX_PAGE_CHARS + 1} characters.")
+
+
+def test_fetch_url_records_a_page_it_could_not_read():
+    agent = SimpleNamespace(state=AgentState())
+    with pytest.raises(ValueError, match="non-public address"):
+        fetch_url(url="http://localhost:11434/api/tags", agent=agent)
+    assert agent.state.get(tools.COVERAGE)["http://localhost:11434/api/tags"]["status"] == "failed"
 
 
 def test_find_links_returns_matching_links_in_page_order():

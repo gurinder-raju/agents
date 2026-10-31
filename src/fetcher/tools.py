@@ -36,6 +36,7 @@ from .report import (
     ARGUMENTS,
     LINK_ITEM,
     SOURCE_ITEM,
+    REPORT_SCHEMA_VERSION,
     ItemContract,
     ReportError,
     canonical_link,
@@ -75,14 +76,19 @@ def fetch_url(url: str, links: str | None = None, agent: Any = None) -> str:
         url: Full http:// or https:// address of the page.
         links: Words that the links you want contain, for example "3.13". Omit to get the page text.
     """
-    response = http_get(url)
+    with _noting_failure(agent, url):
+        response = http_get(url)
     if links is not None:
+        _remember_coverage(agent, url, "complete", f"{url}: searched its links.")
         return find_links(response.text, str(response.url), links)
     is_html = "html" in response.headers.get("content-type", "")
     text = html_to_text(response.text) if is_html else response.text
     _remember_sources(agent, {url: {"title": None, "text": text}})
     if len(text) > MAX_PAGE_CHARS:
+        _remember_coverage(agent, url, "incomplete", f"{url}: read the first {MAX_PAGE_CHARS} of {len(text)} characters.")
         text = text[:MAX_PAGE_CHARS] + f"\n\n[truncated: showing {MAX_PAGE_CHARS} of {len(text)} characters]"
+    else:
+        _remember_coverage(agent, url, "complete", f"{url}: read in full.")
     return text
 
 
@@ -98,7 +104,8 @@ def read_feed(url: str, since_hours: float | None = None, max_entries: int = 25,
         since_hours: Only keep entries published within this many hours. Omit to keep them all.
         max_entries: Keep at most this many entries.
     """
-    title, entries = parse_feed(http_get(url).text)
+    with _noting_failure(agent, url):
+        title, entries = parse_feed(http_get(url).text)
     entries = [{key: value for key, value in entry.items() if key != "html"} for entry in entries]
     if since_hours is not None:
         cutoff = datetime.now(UTC) - timedelta(hours=since_hours)
@@ -112,8 +119,12 @@ def read_feed(url: str, since_hours: float | None = None, max_entries: int = 25,
             {"feed": title, "entries": kept, "omitted": len(entries) - len(kept)}, default=_iso, ensure_ascii=False
         )
         if len(result) <= MAX_PAGE_CHARS or not kept:
-            return result
+            break
         kept = kept[:-1]
+    left_out = len(entries) - len(kept)
+    line = f"{title or url}: {len(kept)} entries" + (f", and {left_out} more that were left out." if left_out else ".")
+    _remember_coverage(agent, url, "incomplete" if left_out else "complete", line)
+    return result
 
 
 # About 10,000 tokens: room for a day of posts and comments in the model's 32k-token context window.
@@ -122,6 +133,8 @@ COMMENT_CHARS = 500
 MIN_COMMENTS_PER_POST = 5
 # Each page of the subreddit's comment feed holds 100 comments and costs one request, about a minute.
 MAX_COMMENT_PAGES = 10
+# The post listing holds the newest 100 posts, which covers a day for all but the busiest subreddits.
+LISTING_POSTS = 100
 _SUBREDDIT_NAME = re.compile(r"^[A-Za-z0-9_]{2,21}$")
 _POST_ID = re.compile(r"/comments/([a-z0-9]+)/")
 # Reddit ends each post's feed entry with "submitted by /u/name [link] [comments]".
@@ -150,15 +163,16 @@ def read_subreddit(subreddit: str, since_hours: float = 24, sort: str = "new", a
     if sort not in ("new", "comments"):
         raise ValueError('sort must be "new" or "comments"')
 
-    # The listing holds the newest 100 posts, which covers a day for all but the busiest subreddits.
-    _, listing = parse_feed(http_get(f"https://www.reddit.com/r/{name}/new/.rss?limit=100").text)
     cutoff = datetime.now(UTC) - timedelta(hours=since_hours)
-    recent = [post for post in listing if post["published"] and post["published"] >= cutoff]
-
-    # Every comment on a post from the window was written inside the window too, so reading the
-    # subreddit's comment feed back to the cutoff finds all of them in a few requests, instead of
-    # one request per post. comments_complete is false if the page limit stopped it early.
-    comments, comments_complete = _read_comment_feed(name, cutoff) if recent else ([], True)
+    with _noting_failure(agent, f"r/{name}"):
+        _, listing = parse_feed(http_get(f"https://www.reddit.com/r/{name}/new/.rss?limit={LISTING_POSTS}").text)
+        recent = [post for post in listing if post["published"] and post["published"] >= cutoff]
+        # Every comment on a post from the window was written inside the window too, so reading the
+        # subreddit's comment feed back to the cutoff finds all of them in a few requests, instead of
+        # one request per post. comments_complete is false if the page limit stopped it early.
+        comments, comments_complete = _read_comment_feed(name, cutoff) if recent else ([], True)
+    # A full listing with nothing older than the cutoff in it may have stopped short of the cutoff.
+    posts_complete = len(listing) < LISTING_POSTS or len(recent) < len(listing)
     by_post: dict[str, list[dict[str, str]]] = {}
     for comment in reversed(comments):  # the feed is newest first; keep each thread oldest first
         match = _POST_ID.search(comment["link"] or "")
@@ -177,11 +191,17 @@ def read_subreddit(subreddit: str, since_hours: float = 24, sort: str = "new", a
                 "comments": thread,
             }
         )
-    return present_posts(name, posts, since_hours, sort, comments_complete, agent)
+    return present_posts(name, posts, since_hours, sort, comments_complete, agent, posts_complete)
 
 
 def present_posts(
-    name: str, posts: list[dict[str, Any]], since_hours: float, sort: str, comments_complete: bool, agent: Any
+    name: str,
+    posts: list[dict[str, Any]],
+    since_hours: float,
+    sort: str,
+    comments_complete: bool,
+    agent: Any,
+    posts_complete: bool = True,
 ) -> str:
     """Turn a subreddit's posts into what the model reads: rewritten by any local text transforms,
     numbered, remembered for write_report, and cut to fit the model's context window."""
@@ -217,7 +237,10 @@ def present_posts(
         coverage += f" {omitted['posts']} posts and {omitted['comments']} comments didn't fit in what the model could read."
     if not comments_complete:
         coverage += f" Comment counts may be low: the comment feed stopped after {MAX_COMMENT_PAGES} pages."
-    _remember_coverage(agent, coverage)
+    if not posts_complete:
+        coverage += f" The post list stopped at {LISTING_POSTS} posts, so older posts in that window weren't read."
+    read_in_full = posts_complete and comments_complete and not omitted["posts"] and not omitted["comments"]
+    _remember_coverage(agent, f"r/{name}", "complete" if read_in_full else "incomplete", coverage)
     return result
 
 
@@ -276,6 +299,20 @@ def write_report(
     post itself, and checks your quotes and links.
     """
     agent = tool_context.agent
+    try:
+        record, reply = _save_report(title, criteria, items, sort, tool_context)
+    except ReportError as error:
+        _progress(f"write_report: {error.stage} failed")
+        agent.state.set(REPORT_FAILURE, {"stage": error.stage, "errors": error.errors})
+        raise
+    agent.state.set(REPORT, record)  # only now, with the file in place
+    agent.state.delete(REPORT_FAILURE)
+    return reply
+
+
+def _save_report(title: Any, criteria: Any, items: Any, sort: Any, tool_context: ToolContext) -> tuple[dict[str, Any], str]:
+    """Validate, resolve, check, render and save, in that order. Returns the report's record and the reply to the model."""
+    agent = tool_context.agent
     prompt = _user_prompt(agent.messages)
     sources = agent.state.get(SOURCES) or {}
     templates = link_patterns(prompt)
@@ -308,12 +345,42 @@ def write_report(
     if sort == "comments":
         items.sort(key=lambda item: item.get("comment_count", -1), reverse=True)
 
+    links = [link for item in items for link in item["links"]]
+    missing = [_with_closest(link) for link in links if link["check"] == "missing"]
+    unreachable = [link["url"] for link in links if link["check"] == "unreachable"]
+    checks = [
+        ("unknown_post", unknown_posts, f"these post ids aren't from read_subreddit, so those items were left out: {', '.join(unknown_posts)}"),
+        ("value_not_found", made_up_values, f"these values aren't in their post or its comments: {' | '.join(made_up_values)}"),
+        ("quote_not_found", unmatched_quotes, f"these quotes aren't in their post or its comments: {' | '.join(unmatched_quotes)}"),
+        ("link_not_from_tools", unsourced, f"no tool returned these links and they don't fill in a pattern the user gave: {', '.join(unsourced)}"),
+        ("link_missing", missing, f"these links don't exist: {', '.join(missing)}"),
+        ("link_unreachable", unreachable, f"these links' hosts didn't answer, so they may or may not work: {', '.join(unreachable)}"),
+    ]
+    problems = [(code, sentence) for code, found, sentence in checks if found]
+    left_out = f"Left out {without_value} items with no value for the link pattern the user gave." if without_value else ""
+
+    reads = list((agent.state.get(COVERAGE) or {}).values())
+    gaps = [read["line"] for read in reads if read["status"] != "complete"]
+    other_warnings = {
+        "no_value": without_value,
+        "no_sources_read": not reads,
+        "source_incomplete": any(read["status"] == "incomplete" for read in reads),
+        "source_failed": any(read["status"] == "failed" for read in reads),
+        "merged_items": merged,
+        "legacy_item": adapted,
+        "links_not_checked": not verified,
+    }
+    warnings = [code for code, _ in problems] + [code for code, found in other_warnings.items() if found]
+    notices = gaps + [f"{sentence[0].upper()}{sentence[1:]}." for _, sentence in problems] + ([left_out] if left_out else [])
+    if not reads:
+        notices.append("No source was read.")
+
     created = datetime.now().astimezone()
-    coverage = agent.state.get(COVERAGE) or []
-    if not verified:
-        coverage = [*coverage, "Links were not checked over the network."]
+    coverage = [read["line"] for read in reads] + ([] if verified else ["Links were not checked over the network."])
     try:
-        html = render_report(title, prompt, criteria, items, created, coverage, by_comments=sort == "comments")
+        html = render_report(
+            title, prompt, criteria, items, created, coverage, by_comments=sort == "comments", notices=notices, empty=_nothing_found(reads)
+        )
     except Exception as error:  # a bug in rendering, which the model can't fix by sending the items again
         raise ReportError("render", [repr(error)]) from error
     # The CLI passes the trace's run id, so a report and its trace share a name. Several agents can run
@@ -326,35 +393,38 @@ def write_report(
         raise ReportError("write", [str(error)]) from error
     _progress(f"write_report: saved {path}")
 
-    links = [link for item in items for link in item["links"]]
-    missing = [_with_closest(link) for link in links if link["check"] == "missing"]
-    unreachable = [link["url"] for link in links if link["check"] == "unreachable"]
-    note = ""
+    record = {
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "run_id": run_id,
+        "path": str(path.resolve()),
+        "status": "saved",
+        "matches": len(items),
+        "warnings": warnings,
+        "skipped": {"unknown_post": len(unknown_posts), "no_value": without_value},
+    }
+
+    note = f" {left_out}" if left_out else ""
     if merged:
         note += f" Merged {merged} items that repeated a post into the first item for that post."
-    if without_value:
-        note += f" Left out {without_value} items with no value for the link pattern the user gave."
     if adapted:
         note += f" Read {adapted} items in an older shape; next time use only the fields this tool lists."
-    problems = []
-    if unknown_posts:
-        problems.append(f"these post ids aren't from read_subreddit, so those items were left out: {', '.join(unknown_posts)}")
-    if made_up_values:
-        problems.append(f"these values aren't in their post or its comments: {' | '.join(made_up_values)}")
-    if unmatched_quotes:
-        problems.append(f"these quotes aren't in their post or its comments: {' | '.join(unmatched_quotes)}")
-    if unsourced:
-        problems.append(f"no tool returned these links and they don't fill in a pattern the user gave: {', '.join(unsourced)}")
-    if missing:
-        problems.append(f"these links don't exist: {', '.join(missing)}")
-    if unreachable:
-        problems.append(f"these links' hosts didn't answer, so they may or may not work: {', '.join(unreachable)}")
+    if gaps or not reads:
+        note += f" It's marked partial because not everything was read: {' '.join(gaps) or 'no source was read.'} Say so in your reply."
     if problems:
-        return (
-            f"Saved {path.resolve()}, but {'; and '.join(problems)}. Fix those items or leave them out, then "
-            f"call write_report again with the same title to replace the report.{note}"
+        return record, (
+            f"Saved {path.resolve()}, but {'; and '.join(sentence for _, sentence in problems)}. Fix those items or leave them "
+            f"out, then call write_report again with the same title to replace the report.{note}"
         )
-    return f"Saved {path.resolve()}.{note}" if note else str(path.resolve())
+    return record, f"Saved {path.resolve()}.{note}" if note else str(path.resolve())
+
+
+def _nothing_found(reads: list[dict[str, str]]) -> str:
+    """What an empty report says, which only means nothing matched if the sources were all read."""
+    if not reads or all(read["status"] == "failed" for read in reads):
+        return "No source could be read, so nothing was checked."
+    if all(read["status"] == "complete" for read in reads):
+        return "Nothing matched the criteria."
+    return "Nothing matched in what could be read."
 
 
 def _save_atomically(path: Path, text: str) -> None:
@@ -556,9 +626,16 @@ def _remember_sources(agent: Any, sources: dict[str | None, dict[str, Any]]) -> 
     agent.state.set(SOURCES, known)
 
 
-# Key in the agent's state for one line per source read, such as how many posts a subreddit had and
-# how many didn't fit, so the report says what it covers.
+# Key in the agent's state for how each read went, by source, so the report says what it covers and an
+# empty report can't pass for sources with nothing in them. Each is {source, status, line}: status is
+# "complete", "incomplete" if some of the source was left out, or "failed"; the line says so in words.
 COVERAGE = "coverage"
+
+
+# Keys in the agent's state for the report this run saved, and for why its last attempt saved nothing.
+# See write_report; outcome.py turns them into the job's outcome.
+REPORT = "report"
+REPORT_FAILURE = "report_failure"
 
 
 # Key in the agent's state for the short post ids read_subreddit hands out, mapped to each post's link.
@@ -571,11 +648,24 @@ def _remember_post_ids(agent: Any, ids: dict[str, str]) -> None:
     agent.state.set(POST_IDS, (agent.state.get(POST_IDS) or {}) | ids)
 
 
-def _remember_coverage(agent: Any, line: str) -> None:
+def _remember_coverage(agent: Any, source: str, status: str, line: str) -> None:
     if agent is None:
         return
-    lines = agent.state.get(COVERAGE) or []
-    agent.state.set(COVERAGE, [*lines, line] if line not in lines else lines)
+    reads = agent.state.get(COVERAGE) or {}
+    earlier = reads.get(source.lower(), {}).get("status")
+    if status == "failed" and earlier in ("complete", "incomplete"):
+        return  # what the earlier read returned still stands
+    agent.state.set(COVERAGE, reads | {source.lower(): {"source": source, "status": status, "line": line}})
+
+
+@contextmanager
+def _noting_failure(agent: Any, source: str) -> Iterator[None]:
+    """Note a read that fails, so a report can't pass it off as a source with nothing in it."""
+    try:
+        yield
+    except Exception as error:
+        _remember_coverage(agent, source, "failed", f"{source}: could not be read ({error}).")
+        raise
 
 
 def _user_prompt(messages: list[dict[str, Any]]) -> str:

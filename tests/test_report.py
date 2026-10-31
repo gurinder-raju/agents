@@ -23,6 +23,12 @@ SOURCES = {
 }
 
 
+# What read_subreddit recorded about how the read went.
+READ = {"source": "r/Python", "status": "complete", "line": "r/Python: 2 posts and 16 comments from the last 24 hours."}
+FAILED_READ = {"source": "r/rust", "status": "failed", "line": "r/rust: could not be read (no route to host)."}
+SHORT_READ = {"source": "r/rust", "status": "incomplete", "line": "r/rust: 40 posts and 300 comments. 9 posts didn't fit."}
+
+
 def tool_context(prompt="Find posts in r/Python about uv", run_id=None, tool_output=f"{POST} {QUIET} {ARTICLE}", tool_input=None, **settings):
     """The parts of Strands' ToolContext that write_report reads: the conversation, the agent's state, the
     run's settings, which keep these tests off the network, and the call as the model made it."""
@@ -31,7 +37,7 @@ def tool_context(prompt="Find posts in r/Python about uv", run_id=None, tool_out
         {"role": "assistant", "content": [{"text": "Reading r/Python."}]},
         {"role": "user", "content": [{"toolResult": {"toolUseId": "t1", "content": [{"text": tool_output}]}}]},
     ]
-    agent = SimpleNamespace(messages=messages, state=AgentState({tools.SOURCES: SOURCES}))
+    agent = SimpleNamespace(messages=messages, state=AgentState({tools.SOURCES: SOURCES, tools.COVERAGE: {"r/python": READ}}))
     invocation_state = {"verify_links": False} | ({"run_id": run_id} if run_id else {}) | settings
     return SimpleNamespace(agent=agent, invocation_state=invocation_state, tool_use={"input": tool_input or {}})
 
@@ -68,7 +74,9 @@ def test_writes_the_prompt_criteria_and_links(report_dir):
 
 def test_an_empty_report_says_nothing_matched(report_dir):
     path = write_report(title="Nothing here", criteria="Posts about uv.", items=[], tool_context=tool_context())
-    assert "Nothing matched the criteria." in open(path).read()
+    html = open(path).read()
+    assert "Nothing matched the criteria." in html
+    assert "Partial report" not in html
 
 
 def test_reports_from_runs_without_a_run_id_get_different_files(report_dir):
@@ -562,7 +570,98 @@ def test_a_failed_render_is_told_apart_from_a_failed_write(report_dir, monkeypat
 
 
 def test_says_what_the_tools_read(report_dir):
+    path = write_report(title="t", criteria="c", items=[], tool_context=tool_context())
+    assert f"<li>{READ['line']}</li>" in open(path).read()
+
+
+def test_records_the_saved_report_once_the_file_is_in_place(report_dir):
+    context = tool_context(run_id="20261026-131500-a1b2c3")
+    context.agent.state.set(tools.POST_IDS, {"Python-1": POST})
+    items = [{"post": "Python-1", "description": "d"}, {"post": "Python-9", "description": "d"}, {"post": "Python-1", "description": "d"}]
+    write_report(title="t", criteria="c", items=items, tool_context=context)
+
+    assert context.agent.state.get(tools.REPORT) == {
+        "schema_version": 1,
+        "run_id": "20261026-131500-a1b2c3",
+        "path": str(report_dir.resolve() / "20261026-131500-a1b2c3-t.html"),
+        "status": "saved",
+        "matches": 1,
+        "warnings": ["unknown_post", "merged_items", "links_not_checked"],
+        "skipped": {"unknown_post": 1, "no_value": 0},
+    }
+
+
+def test_counts_the_items_left_out_for_having_no_value(report_dir):
+    context = tool_context("Link each post to https://example.org/search?q=<name>.")
+    items = [{"post": POST, "fill": "", "description": "d", "quote": "q"}]
+    write_report(title="t", criteria="c", items=items, tool_context=context)
+    report = context.agent.state.get(tools.REPORT)
+    assert report["skipped"] == {"unknown_post": 0, "no_value": 1} and "no_value" in report["warnings"]
+
+
+@pytest.mark.parametrize("stage, setup, expected", [
+    ("validation", lambda monkeypatch: None, "items: expected a list of objects, got null"),
+    ("render", lambda monkeypatch: monkeypatch.setattr(tools, "render_report", lambda *a, **k: 1 / 0), "ZeroDivisionError('division by zero')"),
+    ("write", lambda monkeypatch: monkeypatch.setattr(tools.os, "replace", lambda *a: (_ for _ in ()).throw(OSError("disk full"))), "disk full"),
+])
+def test_a_failed_attempt_records_its_stage_and_never_a_saved_report(report_dir, monkeypatch, stage, setup, expected):
     context = tool_context()
-    context.agent.state.set(tools.COVERAGE, ["r/Python: 26 posts and 812 comments from the last 168 hours."])
-    html = open(write_report(title="t", criteria="c", items=[], tool_context=context)).read()
-    assert "<li>r/Python: 26 posts and 812 comments from the last 168 hours.</li>" in html
+    setup(monkeypatch)
+    with pytest.raises(ReportError):
+        write_report(title="t", criteria="c", items=None if stage == "validation" else [], tool_context=context)
+    assert context.agent.state.get(tools.REPORT) is None
+    assert context.agent.state.get(tools.REPORT_FAILURE) == {"stage": stage, "errors": [expected]}
+
+
+def test_a_later_save_clears_the_failure_and_a_later_failure_keeps_the_report(report_dir):
+    context = tool_context()
+    with pytest.raises(ReportError):
+        write_report(title="t", criteria="c", items=None, tool_context=context)
+    write_report(title="t", criteria="c", items=[], tool_context=context)
+    assert context.agent.state.get(tools.REPORT_FAILURE) is None
+
+    saved = context.agent.state.get(tools.REPORT)
+    with pytest.raises(ReportError):
+        write_report(title="t", criteria="c", items=None, tool_context=context)
+    assert context.agent.state.get(tools.REPORT) == saved
+
+
+def test_an_empty_report_is_not_a_clean_one_if_a_source_failed(report_dir):
+    context = tool_context()
+    context.agent.state.set(tools.COVERAGE, {"r/python": READ, "r/rust": FAILED_READ})
+    result = write_report(title="t", criteria="c", items=[], tool_context=context)
+
+    assert "not everything was read: r/rust: could not be read (no route to host)." in result
+    html = (report_dir / Path(result.split("Saved ")[1].split(".html")[0] + ".html").name).read_text()
+    assert "Partial report" in html and "<li>r/rust: could not be read (no route to host).</li>" in html
+    assert "Nothing matched in what could be read." in html and "Nothing matched the criteria." not in html
+    assert "source_failed" in context.agent.state.get(tools.REPORT)["warnings"]
+
+
+def test_an_empty_report_with_nothing_read_says_nothing_was_checked(report_dir):
+    context = tool_context()
+    context.agent.state.set(tools.COVERAGE, {"r/rust": FAILED_READ})
+    write_report(title="t", criteria="c", items=[], tool_context=context)
+    context.agent.state.delete(tools.COVERAGE)
+    write_report(title="t", criteria="c", items=[], tool_context=context)
+
+    pages = [path.read_text() for path in report_dir.iterdir()]
+    assert len(pages) == 2 and all("No source could be read, so nothing was checked." in page for page in pages)
+    assert "no_sources_read" in context.agent.state.get(tools.REPORT)["warnings"]
+
+
+def test_a_source_cut_short_makes_a_report_partial_even_with_matches(report_dir):
+    context = tool_context()
+    context.agent.state.set(tools.COVERAGE, {"r/python": SHORT_READ})
+    write_report(title="t", criteria="c", items=[{"link": POST, "description": "d"}], tool_context=context)
+    [path] = report_dir.iterdir()
+    assert "Partial report" in path.read_text()
+    assert "source_incomplete" in context.agent.state.get(tools.REPORT)["warnings"]
+
+
+def test_problems_with_the_items_appear_at_the_top_of_the_report(report_dir):
+    context = tool_context()
+    write_report(title="t", criteria="c", items=[{"link": POST, "description": "d", "quote": "not in the post"}], tool_context=context)
+    [path] = report_dir.iterdir()
+    assert "Partial report" in path.read_text()
+    assert "<li>These quotes aren&#x27;t in their post or its comments: not in the post.</li>" in path.read_text()
