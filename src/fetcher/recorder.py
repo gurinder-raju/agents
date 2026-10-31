@@ -2,6 +2,7 @@
 
 Strands calls these hooks as its agent loop runs, so the trace shows the order things happen in:
 the prompt arriving, each model call and what came back, each tool call and its result, and the end.
+After write_report it adds what became of the report, and the command line adds the job's outcome.
 """
 
 import json
@@ -22,6 +23,8 @@ from strands.hooks import (
     HookRegistry,
 )
 
+from .tools import REPORT, REPORT_FAILURE
+
 
 class TraceRecorder(HookProvider):
     def __init__(self, trace_dir: str | Path = "traces") -> None:
@@ -29,6 +32,7 @@ class TraceRecorder(HookProvider):
         self.path = Path(trace_dir) / f"{self.run_id}.jsonl"
         self._step = 0
         self._model_started = 0.0
+        self._requested: dict[str, str] = {}  # toolUseId -> the name the model used, which a hook may rewrite
 
     def register_hooks(self, registry: HookRegistry, **kwargs: Any) -> None:
         registry.add_callback(BeforeInvocationEvent, self.on_invocation_start)
@@ -39,7 +43,7 @@ class TraceRecorder(HookProvider):
         registry.add_callback(AfterInvocationEvent, self.on_invocation_end)
 
     def on_invocation_start(self, event: BeforeInvocationEvent) -> None:
-        self._write("invocation_start", input=event.messages)
+        self._write("invocation_start", input=event.messages, report_required=event.invocation_state.get("report_required", False))
 
     def on_model_request(self, event: BeforeModelCallEvent) -> None:
         # The model keeps no memory between calls: the harness sends the whole conversation every time.
@@ -68,6 +72,7 @@ class TraceRecorder(HookProvider):
         )
 
     def on_tool_call(self, event: BeforeToolCallEvent) -> None:
+        self._requested[event.tool_use["toolUseId"]] = event.tool_use["name"]
         self._write(
             "tool_call",
             tool=event.tool_use["name"],
@@ -76,14 +81,27 @@ class TraceRecorder(HookProvider):
         )
 
     def on_tool_result(self, event: AfterToolCallEvent) -> None:
+        tool = event.tool_use["name"]
         self._write(
             "tool_result",
-            tool=event.tool_use["name"],
+            tool=tool,
+            # SkillNameRedirect can run another tool than the one named. No executed tool means none ran.
+            requested_tool=self._requested.pop(event.tool_use["toolUseId"], tool),
+            executed_tool=tool if event.selected_tool is not None else None,
             tool_use_id=event.tool_use["toolUseId"],
             ms=round(event.duration * 1000) if event.duration is not None else None,
             status=event.result["status"],
             content=event.result["content"],
         )
+        if tool == "write_report":
+            self._record_report(event)
+
+    def _record_report(self, event: AfterToolCallEvent) -> None:
+        state = event.agent.state
+        if event.result["status"] == "success":
+            self._write("artifact_saved", **state.get(REPORT))
+        elif failure := state.get(REPORT_FAILURE):
+            self._write("artifact_failed", **failure)
 
     def on_invocation_end(self, event: AfterInvocationEvent) -> None:
         result = event.result
@@ -92,6 +110,9 @@ class TraceRecorder(HookProvider):
             stop_reason=result.stop_reason if result else None,
             usage=result.metrics.accumulated_usage if result else None,
         )
+
+    def record_outcome(self, outcome: dict[str, Any]) -> None:
+        self._write("job_outcome", **outcome)
 
     def _write(self, kind: str, **fields: Any) -> None:
         self._step += 1

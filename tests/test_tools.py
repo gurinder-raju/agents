@@ -42,11 +42,12 @@ def test_fetch_url_records_how_the_read_went(monkeypatch):
     agent = SimpleNamespace(state=AgentState())
     for url in pages:
         fetch_url(url=url, agent=agent)
-    fetch_url(url="https://example.com/short", links="words", agent=agent)
+    fetch_url(url="https://example.com/long", links="words", agent=agent)
     coverage = agent.state.get(tools.COVERAGE)
 
     assert coverage["https://example.com/short"]["status"] == "complete"
-    assert coverage["https://example.com/long"]["status"] == "incomplete"
+    assert coverage["https://example.com/long"]["status"] == "incomplete"  # a search doesn't read the rest of it
+    assert coverage["links on https://example.com/long"]["status"] == "complete"
     assert coverage["https://example.com/long"]["line"].endswith(f"read the first {tools.MAX_PAGE_CHARS} of {tools.MAX_PAGE_CHARS + 1} characters.")
 
 

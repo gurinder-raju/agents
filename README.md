@@ -34,9 +34,43 @@ second link: one a tool returned, or a pattern you give in the prompt with a pla
 `https://example.com/search?q=<name>`. The report takes titles and comment counts from the posts
 themselves, checks the model's quotes against them, and checks every link.
 
+`write_report` takes a flat list of string fields, and each job sees only the fields it uses. With one
+link pattern in the prompt, every item has `post`, `fill`, `description` and `quote`, and the code resolves
+the post and builds the link. Otherwise an item has `post` or `link`, `description`, and optionally `quote`,
+`extra_link` and `extra_label`. A call that doesn't fit is refused whole, with every problem listed, so
+nothing half-right gets saved. `adapt_legacy_item` in [report.py](src/fetcher/report.py) lists the older
+shapes still accepted. Reports are written atomically, so a failed write leaves any earlier report alone.
+
+### Job outcomes
+
+For a job that has to produce a report, pass `--report-required`. Its instructions then say so. When the
+agent returns, the command line looks for this run's file, and if it isn't there, asks the model once more
+to finish. The exit status tells a script what happened:
+
+| Exit | Outcome | Meaning |
+| --- | --- | --- |
+| 0 | `complete` | Everything was read and nothing's in doubt. Zero matches counts. |
+| 1 | `failed` | The run stopped, or none of its sources could be read. A report may still have been saved. |
+| 2 | | The command line itself was wrong. |
+| 3 | `partial` | The report was saved, but something is incomplete or unconfirmed. It says what at the top. |
+| 4 | `report_not_created` | The job needed a report, and this run's file isn't there. |
+
+A report is partial if a source failed or was cut short, if no source was read, if an item was left out, or
+if a quote, value or link couldn't be confirmed. A valid call is always saved, and the report says what's
+missing; [outcome.py](src/fetcher/outcome.py) holds this policy. An empty report only says nothing matched
+if everything was read.
+
+`--no-verify-links` skips the one step that uses the network, so a report can be built and rendered
+offline. With checks on, each link ends up `reachable`, `missing` (the host answered 404 or 410) or
+`unreachable` (no answer), and Reddit's stay `unverified`. A missing link keeps its URL, with the closest
+page that exists beside it. `--report-json` also saves the report's data as JSON next to its HTML, for
+anything downstream that wants the items rather than the page.
+
 Without logging in, Reddit allows about one request a minute. `read_subreddit` reads the post list and
 then the subreddit's comment feed, 100 comments a request, so a day of a subreddit takes a minute or
 two. Agents running at once on one machine take turns with each host, so they don't use up each
 other's budget.
 
-Each run writes its steps to `traces/<run_id>.jsonl`. Set `AGENT_MODEL` to try another Ollama model, and `OLLAMA_HOST` if Ollama isn't on `localhost:11434`.
+Each run writes its steps to `traces/<run_id>.jsonl`: every model call, each tool result with the tool the
+model asked for and the one that ran, `artifact_saved` or `artifact_failed` after `write_report`, and a final
+`job_outcome`. Set `AGENT_MODEL` to try another Ollama model, and `OLLAMA_HOST` if Ollama isn't on `localhost:11434`.

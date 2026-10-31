@@ -76,10 +76,11 @@ def fetch_url(url: str, links: str | None = None, agent: Any = None) -> str:
         url: Full http:// or https:// address of the page.
         links: Words that the links you want contain, for example "3.13". Omit to get the page text.
     """
-    with _noting_failure(agent, url):
+    source = url if links is None else f"links on {url}"  # a search says nothing about reading the page's text
+    with _noting_failure(agent, source):
         response = http_get(url)
     if links is not None:
-        _remember_coverage(agent, url, "complete", f"{url}: searched its links.")
+        _remember_coverage(agent, source, "complete", f"{source}: searched.")
         return find_links(response.text, str(response.url), links)
     is_html = "html" in response.headers.get("content-type", "")
     text = html_to_text(response.text) if is_html else response.text
@@ -313,52 +314,27 @@ def write_report(
 def _save_report(title: Any, criteria: Any, items: Any, sort: Any, tool_context: ToolContext) -> tuple[dict[str, Any], str]:
     """Validate, resolve, check, render and save, in that order. Returns the report's record and the reply to the model."""
     agent = tool_context.agent
+    settings = tool_context.invocation_state
     prompt = _user_prompt(agent.messages)
     sources = agent.state.get(SOURCES) or {}
     templates = link_patterns(prompt)
-    contract = item_contract(prompt)
     unknown = [name for name in tool_context.tool_use.get("input", {}) if name not in ARGUMENTS]
-    flat_items, adapted = parse_report(title, criteria, items, sort, contract, unknown)
+    flat_items, adapted = parse_report(title, criteria, items, sort, item_contract(prompt), unknown)
 
-    post_ids = agent.state.get(POST_IDS) or {}
-    kept = []
-    unknown_posts = []
-    without_value = 0
-    for item in flat_items:
-        resolved = _resolve_source(item, post_ids, sources)
-        if resolved is None:
-            unknown_posts.append(item["post"])
-        elif contract is LINK_ITEM:
-            kept.append(resolved)
-        elif item["fill"]:
-            kept.append(_fill_pattern(resolved, templates[0]))
-        else:  # the user asked for a link built from a value in each post, and this post has none
-            without_value += 1
+    kept, unknown_posts, without_value = _resolve_items(flat_items, templates, agent.state.get(POST_IDS) or {}, sources)
     items, merged = merge_duplicates(normalize_items(kept))
     unmatched_quotes = match_sources(items, sources)
     made_up_values = _check_filled_values(items, templates, sources)
     unsourced = _find_unsourced_links(items, prompt, agent.messages)
     # The one step that uses the network. Everything else here works offline.
-    verified = tool_context.invocation_state.get("verify_links", True)
+    verified = settings.get("verify_links", True)
     if verified:
         verify_links(items)
     if sort == "comments":
         items.sort(key=lambda item: item.get("comment_count", -1), reverse=True)
 
-    links = [link for item in items for link in item["links"]]
-    missing = [_with_closest(link) for link in links if link["check"] == "missing"]
-    unreachable = [link["url"] for link in links if link["check"] == "unreachable"]
-    checks = [
-        ("unknown_post", unknown_posts, f"these post ids aren't from read_subreddit, so those items were left out: {', '.join(unknown_posts)}"),
-        ("value_not_found", made_up_values, f"these values aren't in their post or its comments: {' | '.join(made_up_values)}"),
-        ("quote_not_found", unmatched_quotes, f"these quotes aren't in their post or its comments: {' | '.join(unmatched_quotes)}"),
-        ("link_not_from_tools", unsourced, f"no tool returned these links and they don't fill in a pattern the user gave: {', '.join(unsourced)}"),
-        ("link_missing", missing, f"these links don't exist: {', '.join(missing)}"),
-        ("link_unreachable", unreachable, f"these links' hosts didn't answer, so they may or may not work: {', '.join(unreachable)}"),
-    ]
-    problems = [(code, sentence) for code, found, sentence in checks if found]
+    problems = _problems(items, unknown_posts, made_up_values, unmatched_quotes, unsourced)
     left_out = f"Left out {without_value} items with no value for the link pattern the user gave." if without_value else ""
-
     reads = list((agent.state.get(COVERAGE) or {}).values())
     gaps = [read["line"] for read in reads if read["status"] != "complete"]
     other_warnings = {
@@ -370,10 +346,9 @@ def _save_report(title: Any, criteria: Any, items: Any, sort: Any, tool_context:
         "legacy_item": adapted,
         "links_not_checked": not verified,
     }
-    warnings = [code for code, _ in problems] + [code for code, found in other_warnings.items() if found]
-    notices = gaps + [f"{sentence[0].upper()}{sentence[1:]}." for _, sentence in problems] + ([left_out] if left_out else [])
-    if not reads:
-        notices.append("No source was read.")
+    warnings = [*problems, *(code for code, found in other_warnings.items() if found)]
+    notices = gaps + [f"{sentence[0].upper()}{sentence[1:]}." for sentence in problems.values()]
+    notices += ([left_out] if left_out else []) + ([] if reads else ["No source was read."])
 
     created = datetime.now().astimezone()
     coverage = [read["line"] for read in reads] + ([] if verified else ["Links were not checked over the network."])
@@ -385,14 +360,8 @@ def _save_report(title: Any, criteria: Any, items: Any, sort: Any, tool_context:
         raise ReportError("render", [repr(error)]) from error
     # The CLI passes the trace's run id, so a report and its trace share a name. Several agents can run
     # at once in one folder, so without one, a random suffix keeps their reports apart.
-    run_id = tool_context.invocation_state.get("run_id") or created.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
+    run_id = settings.get("run_id") or created.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
     path = REPORT_DIR / report_filename(run_id, title)
-    try:
-        _save_atomically(path, html)
-    except OSError as error:
-        raise ReportError("write", [str(error)]) from error
-    _progress(f"write_report: saved {path}")
-
     record = {
         "schema_version": REPORT_SCHEMA_VERSION,
         "run_id": run_id,
@@ -402,6 +371,18 @@ def _save_report(title: Any, criteria: Any, items: Any, sort: Any, tool_context:
         "warnings": warnings,
         "skipped": {"unknown_post": len(unknown_posts), "no_value": without_value},
     }
+    try:
+        # For whatever reads reports downstream: the same facts as the page, as data. The page goes last,
+        # because it's the report: it can't be there without the data that was asked for.
+        if settings.get("report_json"):
+            data = path.with_suffix(".json")
+            record["data_path"] = str(data.resolve())
+            details = {"title": title, "prompt": prompt, "criteria": criteria, "created": created.isoformat(timespec="seconds")}
+            _save_atomically(data, json.dumps(record | details | {"sources": reads, "items": items}, ensure_ascii=False, indent=2))
+        _save_atomically(path, html)
+    except OSError as error:
+        raise ReportError("write", [str(error)]) from error
+    _progress(f"write_report: saved {path}")
 
     note = f" {left_out}" if left_out else ""
     if merged:
@@ -412,10 +393,54 @@ def _save_report(title: Any, criteria: Any, items: Any, sort: Any, tool_context:
         note += f" It's marked partial because not everything was read: {' '.join(gaps) or 'no source was read.'} Say so in your reply."
     if problems:
         return record, (
-            f"Saved {path.resolve()}, but {'; and '.join(sentence for _, sentence in problems)}. Fix those items or leave them "
-            f"out, then call write_report again with the same title to replace the report.{note}"
+            f"Saved {path.resolve()}, but {'; and '.join(problems.values())}. Fix those items or leave them out, then "
+            f"call write_report again with the same title to replace the report.{note}"
         )
     return record, f"Saved {path.resolve()}.{note}" if note else str(path.resolve())
+
+
+def _resolve_items(
+    items: list[dict[str, str]], templates: list[str], post_ids: dict[str, str], sources: dict[str, Any]
+) -> tuple[list[dict[str, str]], list[str], int]:
+    """Give each item its links. Returns the items kept, the post ids no read tool handed out, and how many had no value."""
+    kept = []
+    unknown_posts = []
+    without_value = 0
+    for item in items:
+        resolved = _resolve_source(item, post_ids, sources)
+        if resolved is None:
+            unknown_posts.append(item["post"])
+        elif "fill" not in item:
+            kept.append(resolved)
+        elif item["fill"]:
+            kept.append(_fill_pattern(resolved, templates[0]))
+        else:  # the user asked for a link built from a value in each post, and this post has none
+            without_value += 1
+    return kept, unknown_posts, without_value
+
+
+def _problems(
+    items: list[dict[str, Any]], unknown_posts: list[str], made_up_values: list[str], unmatched_quotes: list[str], unsourced: list[str]
+) -> dict[str, str]:
+    """What's wrong with the report's items, as warning codes and the sentences that explain them."""
+    links = [link for item in items for link in item["links"]]
+    missing = [_with_closest(link) for link in links if link["check"] == "missing"]
+    unreachable = [link["url"] for link in links if link["check"] == "unreachable"]
+    checks = {
+        "unknown_post": (unknown_posts, f"these post ids aren't from read_subreddit, so those items were left out: {', '.join(unknown_posts)}"),
+        "value_not_found": (made_up_values, f"these values aren't in their post or its comments: {' | '.join(made_up_values)}"),
+        "quote_not_found": (unmatched_quotes, f"these quotes aren't in their post or its comments: {' | '.join(unmatched_quotes)}"),
+        "link_not_from_tools": (unsourced, f"no tool returned these links and they don't fill in a pattern the user gave: {', '.join(unsourced)}"),
+        "link_missing": (missing, f"these links don't exist: {', '.join(missing)}"),
+        "link_unreachable": (unreachable, f"these links' hosts didn't answer, so they may or may not work: {', '.join(unreachable)}"),
+    }
+    return {code: sentence for code, (found, sentence) in checks.items() if found}
+
+
+def saved_report(state: Any, run_id: str) -> dict[str, Any] | None:
+    """The report this run saved, going by the record write_report left, if its file is really there."""
+    report = state.get(REPORT)
+    return report if report and report["run_id"] == run_id and Path(report["path"]).is_file() else None
 
 
 def _nothing_found(reads: list[dict[str, str]]) -> str:

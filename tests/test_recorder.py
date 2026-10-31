@@ -27,6 +27,7 @@ def test_writes_one_numbered_line_per_step(tmp_path):
     recorder.on_tool_result(
         SimpleNamespace(
             tool_use=TOOL_USE,
+            selected_tool=object(),
             duration=0.0021,
             result={"toolUseId": "tooluse_1", "status": "success", "content": [{"text": "2026-10-26T17:00:00+00:00"}]},
         )
@@ -38,6 +39,7 @@ def test_writes_one_numbered_line_per_step(tmp_path):
     assert {line["run_id"] for line in lines} == {recorder.run_id}
     assert lines[0]["message_count"] == 1
     assert lines[3]["ms"] == 2
+    assert (lines[3]["requested_tool"], lines[3]["executed_tool"]) == ("current_time", "current_time")
 
 
 def test_records_model_errors(tmp_path):

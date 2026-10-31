@@ -19,6 +19,12 @@ def test_the_agents_write_report_shows_the_contract_for_its_prompt(tmp_path):
     assert "fill" in spec["inputSchema"]["json"]["properties"]["items"]["items"]["required"]
 
 
+def test_a_job_that_needs_a_report_is_told_so(tmp_path):
+    assert agent_module.REPORT_REQUIRED not in build_agent(TraceRecorder(tmp_path)).system_prompt
+    assert agent_module.REPORT_REQUIRED in build_agent(TraceRecorder(tmp_path), report_required=True).system_prompt
+    assert "write_report" in agent_module.REPORT_REQUIRED  # the registered tool, not the link-report skill
+
+
 def test_reddit_skill_parses(tmp_path):
     skill = Skill.from_file("skills/reddit-new-posts", strict=True)
     assert skill.name == "reddit-new-posts"

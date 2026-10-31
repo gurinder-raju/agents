@@ -20,9 +20,17 @@ from .tools import current_time, fetch_url, read_feed, read_subreddit, report_to
 # Generic on purpose. Instructions for a specific job belong in job files under jobs/, which git ignores.
 SYSTEM_PROMPT = """You are a helpful assistant.
 Use your tools when they help you answer. If you can't do something, say so plainly.
-When the user asks for a report, save it with write_report, even when nothing matched.
+When the user asks for a report, save it with write_report, even when nothing matched. A list in
+your reply isn't a report.
 Skills listed under available_skills are not tools. If one fits the task, call the `skills` tool with
 its name before anything else, then follow the instructions it returns."""
+
+# Added for a job that must end with a saved report, which the command line then makes sure of.
+REPORT_REQUIRED = """
+
+This job must end with a saved report. When you've finished with the sources, call write_report once,
+with every match, before your final reply. Call it even if nothing matched or a source couldn't be
+read: the report shows the user what was checked."""
 
 # Each skill is a folder with a SKILL.md. skills/ holds generic ones and is committed;
 # jobs/skills/ is for your own, and git ignores it. Paths are relative to where you run the agent.
@@ -31,7 +39,7 @@ SKILL_DIRS = ["skills", "jobs/skills"]
 LOCAL_TOOL_DIR = Path("jobs/tools")
 
 
-def build_agent(recorder: TraceRecorder, prompt: str = "") -> Agent:
+def build_agent(recorder: TraceRecorder, prompt: str = "", report_required: bool = False) -> Agent:
     """Build the agent for one run. `prompt` picks the report items its model is shown: see report_tool."""
     model = OllamaModel(
         host=os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
@@ -55,7 +63,7 @@ def build_agent(recorder: TraceRecorder, prompt: str = "") -> Agent:
     agent = Agent(
         model=model,
         tools=[current_time, fetch_url, read_feed, read_subreddit, report_tool(prompt), *local_tools],
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=SYSTEM_PROMPT + (REPORT_REQUIRED if report_required else ""),
         # Registered after the recorder, so it runs first after a model call and the trace shows its retries.
         hooks=[recorder, SkillNameRedirect(skills), ReplyRetry()],
         plugins=[skills],
