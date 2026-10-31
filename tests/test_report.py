@@ -1,5 +1,6 @@
 import os
 import stat
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,22 +23,22 @@ SOURCES = {
 }
 
 
-def tool_context(prompt="Find posts in r/Python about uv", run_id=None, tool_output=f"{POST} {QUIET} {ARTICLE}", tool_input=None):
+def tool_context(prompt="Find posts in r/Python about uv", run_id=None, tool_output=f"{POST} {QUIET} {ARTICLE}", tool_input=None, **settings):
     """The parts of Strands' ToolContext that write_report reads: the conversation, the agent's state, the
-    run id and the call as the model made it."""
+    run's settings, which keep these tests off the network, and the call as the model made it."""
     messages = [
         {"role": "user", "content": [{"text": prompt}]},
         {"role": "assistant", "content": [{"text": "Reading r/Python."}]},
         {"role": "user", "content": [{"toolResult": {"toolUseId": "t1", "content": [{"text": tool_output}]}}]},
     ]
     agent = SimpleNamespace(messages=messages, state=AgentState({tools.SOURCES: SOURCES}))
-    return SimpleNamespace(agent=agent, invocation_state={"run_id": run_id} if run_id else {}, tool_use={"input": tool_input or {}})
+    invocation_state = {"verify_links": False} | ({"run_id": run_id} if run_id else {}) | settings
+    return SimpleNamespace(agent=agent, invocation_state=invocation_state, tool_use={"input": tool_input or {}})
 
 
 @pytest.fixture
 def report_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(tools, "REPORT_DIR", tmp_path)
-    monkeypatch.setattr(tools, "_find_missing_links", lambda items: [])  # no network in these tests
     return tmp_path
 
 
@@ -108,16 +109,16 @@ def test_flags_links_no_tool_returned_unless_they_fill_in_a_pattern_from_the_pro
     )
     assert made_up in result and search not in result
     [path] = report_dir.iterdir()
-    assert path.read_text().count("(unverified)") == 1
+    assert path.read_text().count("(no tool returned this link)") == 1
 
 
 def test_says_when_a_link_does_not_exist(report_dir, monkeypatch):
     def mark_extra_link_missing(items):
-        items[0]["links"][1]["missing"] = True
-        return [ARTICLE]
+        items[0]["links"][1]["check"] = "missing"
 
-    monkeypatch.setattr(tools, "_find_missing_links", mark_extra_link_missing)
-    result = write_report(title="t", criteria="c", items=[{"link": POST, "description": "d", "extra_link": ARTICLE}], tool_context=tool_context())
+    monkeypatch.setattr(tools, "verify_links", mark_extra_link_missing)
+    items = [{"link": POST, "description": "d", "extra_link": ARTICLE}]
+    result = write_report(title="t", criteria="c", items=items, tool_context=tool_context(verify_links=True))
     assert f"these links don't exist: {ARTICLE}" in result
     [path] = report_dir.iterdir()
     assert "(not found)" in path.read_text()
@@ -273,30 +274,103 @@ def test_a_pattern_at_the_end_of_a_sentence_keeps_its_own_punctuation():
     ]
 
 
-def test_tries_a_less_specific_version_before_the_pages_above():
+def links_of(*urls):
+    return [{"links": [{"label": "l", "url": url, "check": "unverified"} for url in urls]}]
+
+
+def web(pages=(), down=()):
+    """A client for a fake web: these paths answer 200, those hosts don't answer, and the rest is 404."""
     def fake_web(request):
-        return httpx.Response(200 if request.url.path in ("/latest/python3.12/", "/latest/") else 404)
-
-    items = normalize_items([{"link": "https://example.com/latest/python3.12.4/", "description": "d"}])
-    tools._find_missing_links(items, httpx.Client(transport=httpx.MockTransport(fake_web)))
-    assert items[0]["links"][0]["url"] == "https://example.com/latest/python3.12/"
-
-
-def test_checks_links_and_falls_back_to_the_closest_page_that_exists():
-    pages = {"/ok", "/files/"}
-
-    def fake_web(request):
+        if request.url.host in down:
+            raise httpx.ConnectError("no answer")
         return httpx.Response(200 if request.url.path in pages else 404)
 
-    links = ["https://example.com/ok", "https://example.com/missing", "https://example.com/files/2.1/", POST]
-    items = [{"links": [{"label": "l", "url": url} for url in links]}]
-    missing = tools._find_missing_links(items, httpx.Client(transport=httpx.MockTransport(fake_web)))
+    return httpx.Client(transport=httpx.MockTransport(fake_web))
 
-    assert missing == ["https://example.com/missing"]  # nothing above it but the bare site
-    ok, gone, replaced, reddit = items[0]["links"]
-    assert ok["missing"] is False and gone["missing"] is True
-    assert replaced["url"] == "https://example.com/files/" and replaced["closest_to"] == "https://example.com/files/2.1/"
-    assert "missing" not in reddit  # Reddit links aren't checked
+
+def test_tries_a_less_specific_version_before_the_pages_above():
+    [item] = links_of("https://example.com/latest/python3.12.4/")
+    tools.verify_links([item], web(pages=("/latest/python3.12/", "/latest/")))
+    [link] = item["links"]
+    assert link["closest"] == "https://example.com/latest/python3.12/"
+
+
+def test_a_missing_link_keeps_its_own_url_beside_the_closest_page_that_exists():
+    url = "https://example.com/files/2.1/"
+    [item] = links_of(url)
+    tools.verify_links([item], web(pages=("/files/",)))
+    [link] = item["links"]
+    assert link["url"] == url and link["check"] == "missing"
+    assert link["closest"] == "https://example.com/files/"
+
+    html = tools.render_report("t", "p", "c", [{"title": "A", "description": "", "quote": "", **item}], datetime.now())
+    assert f'<a href="{url}" rel="noopener noreferrer">l</a> <span class="missing">(not found)</span>' in html
+    assert '<a href="https://example.com/files/" rel="noopener noreferrer">closest page that exists</a>' in html
+
+
+def test_tells_reachable_missing_and_unreachable_links_apart():
+    def fake_web(request):
+        answers = {"/ok": 200, "/moved-away": 410, "/members": 403, "/broken": 503}
+        if request.url.host == "down.example":
+            raise httpx.ConnectError("no answer")
+        return httpx.Response(answers.get(request.url.path, 404))
+
+    urls = ["ok", "gone", "moved-away", "members", "broken"]
+    items = links_of(*(f"https://example.com/{path}" for path in urls), "https://down.example/page", POST, "https://notreddit.com/ok")
+    tools.verify_links(items, httpx.Client(transport=httpx.MockTransport(fake_web)))
+    assert [link["check"] for link in items[0]["links"]] == [
+        "reachable", "missing", "missing", "reachable", "reachable", "unreachable", "unverified", "reachable",
+    ]
+
+
+def test_a_host_that_does_not_answer_is_not_searched_for_a_closest_page():
+    item = links_of("https://down.example/a/b/c")[0]
+    requested = []
+
+    def fake_web(request):
+        requested.append(request.url.path)
+        raise httpx.ConnectTimeout("no answer")
+
+    tools.verify_links([item], httpx.Client(transport=httpx.MockTransport(fake_web)))
+    assert requested == ["/a/b/c"] and "closest" not in item["links"][0]
+
+
+def test_a_host_the_guard_refuses_counts_as_unreachable(monkeypatch):
+    monkeypatch.setattr(tools.socket, "getaddrinfo", lambda *args: [(0, 0, 0, "", ("127.0.0.1", 0))])
+    items = links_of("http://localhost:11434/api/tags")
+    tools.verify_links(items)
+    assert items[0]["links"][0]["check"] == "unreachable"
+
+
+def test_says_when_a_links_host_did_not_answer(report_dir, monkeypatch):
+    def mark_unreachable(items):
+        items[0]["links"][0]["check"] = "unreachable"
+
+    monkeypatch.setattr(tools, "verify_links", mark_unreachable)
+    items = [{"link": ARTICLE, "description": "d"}]
+    result = write_report(title="t", criteria="c", items=items, tool_context=tool_context(verify_links=True))
+    assert f"these links' hosts didn't answer, so they may or may not work: {ARTICLE}" in result
+    [path] = report_dir.iterdir()
+    assert "(could not be reached)" in path.read_text()
+
+
+def test_validation_and_rendering_work_with_no_network_at_all(report_dir, monkeypatch):
+    def no_network(*args, **kwargs):
+        raise AssertionError("a report with link checks off must not touch the network")
+
+    monkeypatch.setattr(tools.httpx, "Client", no_network)
+    monkeypatch.setattr(tools.socket, "getaddrinfo", no_network)
+    path = write_report(title="t", criteria="c", items=[{"link": POST, "description": "d"}], tool_context=tool_context())
+    assert "Links were not checked over the network." in open(path).read()
+
+
+def test_links_are_checked_unless_the_run_says_not_to(report_dir, monkeypatch):
+    checked = []
+    monkeypatch.setattr(tools, "verify_links", checked.append)
+    context = tool_context()
+    del context.invocation_state["verify_links"]
+    write_report(title="t", criteria="c", items=[], tool_context=context)
+    assert len(checked) == 1
 
 
 def test_canonical_links_ignore_how_a_link_is_written():
@@ -378,7 +452,7 @@ def test_resolves_post_ids_and_fixes_a_mangled_reddit_link(report_dir):
     html = (report_dir / Path(result.split("Saved ")[1].split(",")[0]).name).read_text()
     assert f'<a href="{POST}" rel="noopener noreferrer">Switched to uv</a>' in html
     assert f'<a href="{QUIET}" rel="noopener noreferrer">A quiet post</a>' in html
-    assert "(unverified)" not in html
+    assert "(no tool returned this link)" not in html
 
 
 def test_a_source_can_be_named_by_its_link_in_a_pattern_job(report_dir):
@@ -403,7 +477,7 @@ def test_merges_items_that_repeat_a_post(report_dir):
     result = write_report(title="t", criteria="c", items=items, tool_context=tool_context(prompt))
     assert "Merged 2 items" in result
     html = open(result.split("Saved ")[1].split(".html")[0] + ".html").read()
-    assert html.count("<li>") == 1
+    assert html.count("<h3>") == 1
     assert html.count('href="https://example.org/search?q=') == 2  # q=Python and q=quiet, each once
 
 

@@ -300,13 +300,18 @@ def write_report(
     items, merged = merge_duplicates(normalize_items(kept))
     unmatched_quotes = match_sources(items, sources)
     made_up_values = _check_filled_values(items, templates, sources)
-    unverified = _find_unverified_links(items, prompt, agent.messages)
-    missing = _find_missing_links(items)
+    unsourced = _find_unsourced_links(items, prompt, agent.messages)
+    # The one step that uses the network. Everything else here works offline.
+    verified = tool_context.invocation_state.get("verify_links", True)
+    if verified:
+        verify_links(items)
     if sort == "comments":
         items.sort(key=lambda item: item.get("comment_count", -1), reverse=True)
 
     created = datetime.now().astimezone()
     coverage = agent.state.get(COVERAGE) or []
+    if not verified:
+        coverage = [*coverage, "Links were not checked over the network."]
     try:
         html = render_report(title, prompt, criteria, items, created, coverage, by_comments=sort == "comments")
     except Exception as error:  # a bug in rendering, which the model can't fix by sending the items again
@@ -321,8 +326,10 @@ def write_report(
         raise ReportError("write", [str(error)]) from error
     _progress(f"write_report: saved {path}")
 
-    replaced = [f"{link['closest_to']} -> {link['url']}" for item in items for link in item["links"] if "closest_to" in link]
-    note = f" These links don't exist, so it links the closest page that does: {', '.join(replaced)}." if replaced else ""
+    links = [link for item in items for link in item["links"]]
+    missing = [_with_closest(link) for link in links if link["check"] == "missing"]
+    unreachable = [link["url"] for link in links if link["check"] == "unreachable"]
+    note = ""
     if merged:
         note += f" Merged {merged} items that repeated a post into the first item for that post."
     if without_value:
@@ -336,10 +343,12 @@ def write_report(
         problems.append(f"these values aren't in their post or its comments: {' | '.join(made_up_values)}")
     if unmatched_quotes:
         problems.append(f"these quotes aren't in their post or its comments: {' | '.join(unmatched_quotes)}")
-    if unverified:
-        problems.append(f"no tool returned these links and they don't fill in a pattern the user gave: {', '.join(unverified)}")
+    if unsourced:
+        problems.append(f"no tool returned these links and they don't fill in a pattern the user gave: {', '.join(unsourced)}")
     if missing:
         problems.append(f"these links don't exist: {', '.join(missing)}")
+    if unreachable:
+        problems.append(f"these links' hosts didn't answer, so they may or may not work: {', '.join(unreachable)}")
     if problems:
         return (
             f"Saved {path.resolve()}, but {'; and '.join(problems)}. Fix those items or leave them out, then "
@@ -457,7 +466,7 @@ def _fill_pattern(item: dict[str, str], pattern: str) -> dict[str, str]:
 _URL_PATTERN = re.compile(r"(https?://[^\s\"'<>{}\\]+)[<{]")
 
 
-def _find_unverified_links(items: list[dict[str, Any]], prompt: str, messages: list[dict[str, Any]]) -> list[str]:
+def _find_unsourced_links(items: list[dict[str, Any]], prompt: str, messages: list[dict[str, Any]]) -> list[str]:
     """Mark links that no tool returned and that don't fill in a pattern from the prompt: they may be made up.
 
     A pattern is a URL in the prompt with a placeholder, such as https://example.com/search?q=<name>.
@@ -470,24 +479,23 @@ def _find_unverified_links(items: list[dict[str, Any]], prompt: str, messages: l
         for url in _URL.findall(part.get("text", ""))
     }
     patterns = [match.group(1).lower() for match in _URL_PATTERN.finditer(prompt)]
-    unverified = []
+    unsourced = []
     for link in (link for item in items for link in item["links"]):
         filled_in = any(link["url"].lower().startswith(pattern) for pattern in patterns)
         if canonical_link(link["url"]) not in returned and not filled_in:
-            link["unverified"] = True
-            unverified.append(link["url"])
-    return unverified
+            link["unsourced"] = True
+            unsourced.append(link["url"])
+    return unsourced
 
 
-def _find_missing_links(items: list[dict[str, Any]], client: httpx.Client | None = None) -> list[str]:
-    """Check links, so broken ones don't reach the report as if they worked.
+def verify_links(items: list[dict[str, Any]], client: httpx.Client | None = None) -> None:
+    """Ask each link's host whether the page is there, and note what came back in the link's `check`.
 
-    A link that answers 404 or 410 is replaced with the closest page above it that exists, such as
-    https://example.com/files/ for https://example.com/files/2.1/, and keeps the original in
-    `closest_to`. If there is none, or the host doesn't answer, it's marked missing. Reddit links
-    come from read_subreddit and Reddit allows one request a minute, so they aren't checked.
+    Links start out "unverified". "reachable" means the host answered, and not with a 404 or 410.
+    "missing" means it did answer 404 or 410, and if a page nearby exists it goes in `closest`: the link
+    keeps its own url either way. "unreachable" means no answer, which says nothing about the page.
+    Reddit links come from read_subreddit and Reddit allows one request a minute, so they stay unverified.
     """
-    missing = []
     client = client or httpx.Client(
         follow_redirects=True,
         timeout=10,
@@ -496,22 +504,24 @@ def _find_missing_links(items: list[dict[str, Any]], client: httpx.Client | None
     )
     with client:
         for link in (link for item in items for link in item["links"]):
-            if httpx.URL(link["url"]).host.removeprefix("www.").endswith("reddit.com"):
+            host = (urlsplit(link["url"]).hostname or "").lower()
+            if host == "reddit.com" or host.endswith(".reddit.com"):
                 continue
-            link["missing"] = not _page_exists(client, link["url"])
-            if link["missing"] and (closest := _closest_existing_page(client, link["url"])):
-                link.update(closest_to=link["url"], url=closest, missing=False)
-            if link["missing"]:
-                missing.append(link["url"])
-    return missing
+            link["check"] = _check_link(client, link["url"])
+            if link["check"] == "missing" and (closest := _closest_existing_page(client, link["url"])):
+                link["closest"] = closest
 
 
-def _page_exists(client: httpx.Client, url: str) -> bool:
+def _check_link(client: httpx.Client, url: str) -> str:
     try:
         with client.stream("GET", url) as response:
-            return response.status_code not in (404, 410)
-    except (httpx.HTTPError, ValueError, OSError):
-        return False
+            return "missing" if response.status_code in (404, 410) else "reachable"
+    except (httpx.HTTPError, httpx.InvalidURL, ValueError, OSError):
+        return "unreachable"
+
+
+def _with_closest(link: dict[str, Any]) -> str:
+    return f"{link['url']} (the closest page that exists is {link['closest']})" if "closest" in link else link["url"]
 
 
 def _closest_existing_page(client: httpx.Client, url: str) -> str | None:
@@ -524,11 +534,11 @@ def _closest_existing_page(client: httpx.Client, url: str) -> str | None:
     while (shorter := re.sub(r"(\d)\.\d+$", r"\1", last)) != last:
         last = shorter
         candidate = f"{parts.scheme}://{parts.netloc}/{'/'.join([*segments[:-1], last])}{trailing_slash}"
-        if _page_exists(client, candidate):
+        if _check_link(client, candidate) == "reachable":
             return candidate
     for depth in range(len(segments) - 1, 0, -1):
         candidate = f"{parts.scheme}://{parts.netloc}/{'/'.join(segments[:depth])}/"
-        if _page_exists(client, candidate):
+        if _check_link(client, candidate) == "reachable":
             return candidate
     return None
 

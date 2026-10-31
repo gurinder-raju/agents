@@ -266,12 +266,16 @@ def trim_sentence_end(url: str) -> str:
 
 
 def normalize_items(items: list[dict[str, str]]) -> list[dict[str, Any]]:
-    """Give each checked item, its source's link now resolved, a title, description, quote and links: [{label, url}]."""
+    """Give each checked item, its source's link now resolved, a title, description, quote and links.
+
+    Each link is {label, url, check}. `check` says what's known of the page over HTTP: nothing yet.
+    """
     normalized = []
     for item in items:
-        links = [{"label": "post", "url": item["link"]}]
+        links = [{"label": "post", "url": item["link"], "check": "unverified"}]
         if extra_link := item.get("extra_link"):
-            links.append({"label": item.get("extra_label") or urlsplit(extra_link).netloc, "url": extra_link})
+            label = item.get("extra_label") or urlsplit(extra_link).netloc
+            links.append({"label": label, "url": extra_link, "check": "unverified"})
         normalized.append({
             "title": item["link"],
             "description": item["description"],
@@ -399,14 +403,7 @@ def _render_coverage(coverage: list[str]) -> str:
 
 
 def _render_item(item: dict[str, Any]) -> str:
-    links = " · ".join(
-        f'<a href="{escape(link["url"])}" rel="noopener noreferrer">{escape(link["label"])}</a>'
-        + (' <span class="missing">(not found)</span>' if link.get("missing") else "")
-        + (' <span class="missing">(unverified)</span>' if link.get("unverified") else "")
-        + (f' <span class="note" title="{escape(link["closest_to"])}">(closest page that exists)</span>' if link.get("closest_to") else "")
-        + (' <span class="missing">(value not in the post)</span>' if link.get("value_not_found") else "")
-        for link in item["links"]
-    )
+    links = " · ".join(_render_link(link) for link in item["links"])
     count = item.get("comment_count")
     meta = f'\n<p class="meta">{count} comment{"" if count == 1 else "s"}</p>' if count is not None else ""
     description = f'\n<p class="description">{escape(item["description"])}</p>' if item["description"] else ""
@@ -418,6 +415,21 @@ def _render_item(item: dict[str, Any]) -> str:
 <h3><a href="{escape(item["links"][0]["url"])}" rel="noopener noreferrer">{escape(item["title"])}</a></h3>{meta}{description}{quote}
 <p class="links">{links}</p>
 </li>"""
+
+
+def _render_link(link: dict[str, Any]) -> str:
+    html = f'<a href="{escape(link["url"])}" rel="noopener noreferrer">{escape(link["label"])}</a>'
+    if link.get("check") == "missing":
+        html += ' <span class="missing">(not found)</span>'
+    if link.get("closest"):
+        html += f' · <a href="{escape(link["closest"])}" rel="noopener noreferrer">closest page that exists</a>'
+    if link.get("check") == "unreachable":
+        html += ' <span class="missing">(could not be reached)</span>'
+    if link.get("unsourced"):
+        html += ' <span class="missing">(no tool returned this link)</span>'
+    if link.get("value_not_found"):
+        html += ' <span class="missing">(value not in the post)</span>'
+    return html
 
 
 def report_filename(run_id: str, title: str) -> str:
@@ -452,5 +464,4 @@ a { color: var(--link); overflow-wrap: anywhere; }
 .empty { color: var(--muted); }
 blockquote { margin: 6px 0 8px; padding: 2px 0 2px 12px; border-left: 3px solid var(--line); color: var(--muted); }
 .missing { color: #b3261e; }
-.note { color: var(--muted); font-size: 0.85rem; }
 """
