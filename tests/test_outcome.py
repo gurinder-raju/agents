@@ -318,6 +318,17 @@ def test_asks_the_model_to_explain_what_it_read_and_left_out(run):
     assert second["warnings"] == ["links_not_checked"]
 
 
+def test_a_model_that_repeats_itself_is_told_to_stop_and_saved_once(run):
+    bad_quote = {"post": "learnpython-1", "description": "d", "quote": "not in the post"}
+    report = ("write_report", {"title": "uv posts", "criteria": "c", "items": [bad_quote], "left_out": NOT_ABOUT_UV})
+    code, _, steps, _ = run(READ_SOURCE, report, report, "The report has a bad quote.")
+    assert code == 3
+    assert len(kinds(steps, "artifact_saved")) == 1
+    _, first, second = kinds(steps, "tool_result")
+    assert "call write_report again" in first["content"][0]["text"]
+    assert second["content"][0]["text"] == tools.SAME_REPORT and second["status"] == "success"
+
+
 def test_asks_only_once_then_ends_partial_with_the_report_still_there(run):
     code, out, _, model = run(READ_SOURCE, SILENT_REPORT, "Saved.", "That's all I have.", "Never reached.", flags=["--report-required"])
     assert code == 3

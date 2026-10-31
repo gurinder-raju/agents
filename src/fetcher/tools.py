@@ -374,6 +374,13 @@ def write_report(
     and checks your quotes and links.
     """
     agent = tool_context.agent
+    # A small model that can't fix what a reply flags sends the same call again and again, at half a
+    # minute a time. What it read counts too: a source read since can change the report.
+    call = json.dumps([title, criteria, items, sort, left_out, agent.state.get(COVERAGE)], sort_keys=True, default=str)
+    earlier = agent.state.get(REPORT)
+    if earlier and call == agent.state.get(REPORT_CALL) and Path(earlier["path"]).is_file():
+        agent.state.delete(REPORT_FAILURE)  # it's gone back to the report that stands
+        return SAME_REPORT
     try:
         record, reply = _save_report(title, criteria, items, sort, left_out, tool_context)
     except ReportError as error:
@@ -381,6 +388,7 @@ def write_report(
         agent.state.set(REPORT_FAILURE, {"stage": error.stage, "errors": error.errors})
         raise
     agent.state.set(REPORT, record)  # only now, with the file in place
+    agent.state.set(REPORT_CALL, call)
     agent.state.delete(REPORT_FAILURE)
     return reply
 
@@ -845,6 +853,12 @@ COVERAGE = "coverage"
 # See write_report; outcome.py turns them into the job's outcome.
 REPORT = "report"
 REPORT_FAILURE = "report_failure"
+# And for the call that saved that report, to tell when the model sends it again unchanged.
+REPORT_CALL = "report_call"
+SAME_REPORT = (
+    "Nothing changed: that's the report you already saved, and it stands as it was. Don't call write_report again "
+    "unless you have something to change. Finish with your reply, and say what's still wrong with the report, if anything."
+)
 
 
 # Key in the agent's state for the short post ids read_subreddit hands out, mapped to each post's link.

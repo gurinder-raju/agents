@@ -665,6 +665,70 @@ def test_the_saved_data_is_the_records_the_page_was_built_from(report_dir, monke
     assert rendered == [report["items"]] == [json.loads(Path(report["data_path"]).read_text())["items"]]
 
 
+@pytest.mark.parametrize("quote", ["First line\nSecond line", "First line\\nSecond line", "first line second line"])
+def test_a_quote_over_a_line_break_matches_however_the_break_arrives(report_dir, quote):
+    context = tool_context()
+    context.agent.state.set(tools.SOURCES, {canonical_link(POST): {"title": "T", "text": "T\nFirst line\nSecond line"}})
+    write_report(title="t", criteria="c", items=[{"link": POST, "description": "d", "quote": quote}], tool_context=context)
+    assert "quote_not_found" not in context.agent.state.get(tools.REPORT)["warnings"]
+
+
+@pytest.mark.parametrize("fill", ["Hi\nYo", "Hi\r\nYo", "Hi\\nYo"])
+def test_a_value_with_a_line_break_in_it_is_refused_however_the_break_arrives(fill):
+    with pytest.raises(ReportError, match=r"items\[0\]\.fill: expected one value on one line"):
+        parse_report("t", "c", [{"post": POST, "fill": fill, "description": "d", "quote": "q"}], "as_given", SOURCE_ITEM)
+
+
+def test_the_same_call_again_changes_nothing_and_says_to_stop(report_dir, monkeypatch):
+    context = tool_context()
+    items = [{"link": POST, "description": "d", "quote": "not in the post"}]
+    first = write_report(title="t", criteria="c", items=items, tool_context=context)
+    assert "call write_report again" in first
+
+    def no_second_save(*args):
+        raise AssertionError("an unchanged call has nothing to save")
+
+    monkeypatch.setattr(tools, "_save_report", no_second_save)
+    assert write_report(title="t", criteria="c", items=items, tool_context=context) == tools.SAME_REPORT
+
+
+def test_a_changed_call_or_a_new_read_saves_again(report_dir):
+    context = tool_context()
+    items = [{"link": POST, "description": "d"}]
+    write_report(title="t", criteria="c", items=items, tool_context=context)
+    assert write_report(title="t", criteria="c", items=items + [{"link": QUIET, "description": "d"}], tool_context=context) != tools.SAME_REPORT
+
+    assert write_report(title="t", criteria="c", items=items, tool_context=context) != tools.SAME_REPORT
+    context.agent.state.set(tools.COVERAGE, {"r/python": READ, "r/rust": FAILED_READ})
+    assert write_report(title="t", criteria="c", items=items, tool_context=context) != tools.SAME_REPORT
+    assert "source_failed" in context.agent.state.get(tools.REPORT)["warnings"]
+
+
+def test_the_same_call_saves_again_if_the_file_has_gone(report_dir):
+    context = tool_context(run_id="20261026-131500-a1b2c3")
+    path = Path(write_report(title="t", criteria="c", items=[], tool_context=context))
+    path.unlink()
+    write_report(title="t", criteria="c", items=[], tool_context=context)
+    assert path.is_file()
+
+
+def test_going_back_to_the_saved_report_clears_a_failed_attempt(report_dir):
+    context = tool_context()
+    write_report(title="t", criteria="c", items=[], tool_context=context)
+    with pytest.raises(ReportError):
+        write_report(title="t", criteria="c", items=None, tool_context=context)
+    assert context.agent.state.get(tools.REPORT_FAILURE) is not None
+    assert write_report(title="t", criteria="c", items=[], tool_context=context) == tools.SAME_REPORT
+    assert context.agent.state.get(tools.REPORT_FAILURE) is None
+
+
+def test_a_failed_call_is_refused_every_time(report_dir):
+    context = tool_context()
+    for _ in range(2):
+        with pytest.raises(ReportError):
+            write_report(title="t", criteria="c", items=None, tool_context=context)
+
+
 def test_each_quote_is_flagged_on_its_own(report_dir):
     items = [{"post": POST, "fill": "uv", "description": "d", "quote": "moved to uv"}, {"post": POST, "fill": "uv", "description": "d", "quote": "made this up"}]
     report, html = saved_report_of(items)

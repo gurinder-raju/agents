@@ -34,6 +34,7 @@ class TraceRecorder(HookProvider):
         self._step = 0
         self._model_started = 0.0
         self._requested: dict[str, str] = {}  # toolUseId -> the name the model used, which a hook may rewrite
+        self._saved: dict[str, Any] | None = None  # the last report recorded: a repeated call saves nothing new
 
     def register_hooks(self, registry: HookRegistry, **kwargs: Any) -> None:
         registry.add_callback(BeforeInvocationEvent, self.on_invocation_start)
@@ -100,7 +101,9 @@ class TraceRecorder(HookProvider):
     def _record_report(self, event: AfterToolCallEvent) -> None:
         state = event.agent.state
         if event.result["status"] == "success":
-            self._write("artifact_saved", **state.get(REPORT))
+            if (report := state.get(REPORT)) != self._saved:
+                self._write("artifact_saved", **report)
+                self._saved = report
         elif failure := state.get(REPORT_FAILURE):
             self._write("artifact_failed", **failure)
 

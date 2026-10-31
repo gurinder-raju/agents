@@ -237,7 +237,8 @@ def _shown(value: Any) -> str:
 
 _NOT_IN_A_URL = re.compile(r"[\s\x00-\x1f\x7f]")
 _SECOND_URL = re.compile(r"[,;|]\s*https?://", re.I)
-_LINE_BREAK = re.compile(r"[\r\n]")
+# A real line break, or one written out: see _words.
+_LINE_BREAK = re.compile(r"[\r\n]|\\[nr]")
 
 
 def url_problem(value: str) -> str | None:
@@ -412,9 +413,16 @@ def canonical_link(url: str) -> str:
     return host + parts.path.rstrip("/") + (f"?{parts.query}" if parts.query else "")
 
 
+_WRITTEN_OUT_BREAK = re.compile(r"\\[nrt]")
+
+
 def _words(text: str) -> str:
-    """Lowercase words only, so a quote matches whatever the punctuation and spacing around it."""
-    return " ".join(re.findall(r"\w+", text.lower()))
+    """Lowercase words only, so a quote matches whatever the punctuation and spacing around it.
+
+    A model reads a line break in a tool result as \\n, and gemma's tool calls have no escapes, so one
+    it copies arrives as a backslash and an n.
+    """
+    return " ".join(re.findall(r"\w+", _WRITTEN_OUT_BREAK.sub(" ", text.lower())))
 
 
 def render_report(
