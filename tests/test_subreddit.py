@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -251,3 +252,112 @@ def test_a_failing_transform_leaves_the_text_alone(fake_reddit):
     agent = SimpleNamespace(state=AgentState(), text_transforms=[broken])
     [post] = json.loads(read_subreddit(subreddit="learnpython", agent=agent))["posts"]
     assert post["comments"][0]["text"] == "uv creates the venv for you."
+
+
+def find_marked(text):
+    """What a local tool's find_groups does: this one looks for [found: ...]."""
+    return [
+        {"text": match.group(1), "lines": match.group(1).split("\n"), "start": match.start(), "end": match.end()}
+        for match in re.finditer(r"\[found: ([^\]]*)\]", text)
+    ]
+
+
+def reader():
+    return SimpleNamespace(state=AgentState(), group_finders=[find_marked])
+
+
+def body_of(text):
+    return ATOM.replace("Should I use venv &amp;amp; pip or uv?", text)
+
+
+def the_source(agent):
+    return list(agent.state.get(tools.SOURCES).values())[0]
+
+
+def test_remembers_where_each_post_was_found_and_that_the_model_got_it(fake_reddit):
+    agent = reader()
+    read_subreddit(subreddit="learnpython", agent=agent)
+    source = the_source(agent)
+    assert source["read_from"] == "r/learnpython" and source["shown"] is True and source["groups"] == []
+
+
+def test_remembers_each_group_in_a_post_with_where_it_is(fake_reddit):
+    fake_reddit.pages[LISTING_URL] = body_of("One [found: Ada] and two [found: Bob].")
+    fake_reddit.pages[COMMENTS_URL] = comment_feed(comment("c1", "1abc23", "/u/a", "And [found: Cy].", 1))
+    agent = reader()
+    read_subreddit(subreddit="learnpython", agent=agent)
+
+    groups = the_source(agent)["groups"]
+    assert [(group["text"], group["field"], group["shown"]) for group in groups] == [
+        ("Ada", "text", True), ("Bob", "text", True), ("Cy", "comments[0]", True),
+    ]
+    assert groups[0]["start"] == 4 and groups[0]["end"] == 16
+
+
+def test_local_tools_see_the_whole_text_and_only_then_is_it_cut(fake_reddit):
+    fake_reddit.pages[LISTING_URL] = body_of("x " * tools.FEED_TEXT_CHARS + "[found: Late]")
+    agent = reader()
+    agent.text_transforms = [lambda text: text.replace("Late", "Later")]
+    [post] = json.loads(read_subreddit(subreddit="learnpython", agent=agent))["posts"]
+
+    assert len(post["text"]) == tools.FEED_TEXT_CHARS + len(" [...]") and "found" not in post["text"]
+    [group] = the_source(agent)["groups"]
+    assert group["text"] == "Later" and group["shown"] is False
+    read = agent.state.get(tools.COVERAGE)["r/learnpython"]
+    assert read["status"] == "incomplete" and "1 groups a local tool found were cut off before the model read them." in read["line"]
+
+
+def test_several_groups_past_each_other_in_a_long_post_are_all_found(fake_reddit):
+    fake_reddit.pages[LISTING_URL] = body_of("[found: Ada] " + "x " * tools.FEED_TEXT_CHARS + "[found: Bob]")
+    agent = reader()
+    read_subreddit(subreddit="learnpython", agent=agent)
+    assert [(group["text"], group["shown"]) for group in the_source(agent)["groups"]] == [("Ada", True), ("Bob", False)]
+
+
+def test_a_group_cut_off_a_long_comment_is_noted(fake_reddit):
+    fake_reddit.pages[COMMENTS_URL] = comment_feed(comment("c1", "1abc23", "/u/a", "x " * tools.COMMENT_CHARS + "[found: Late]", 1))
+    agent = reader()
+    read_subreddit(subreddit="learnpython", agent=agent)
+    [group] = the_source(agent)["groups"]
+    assert group["field"] == "comments[0]" and group["shown"] is False
+    assert agent.state.get(tools.COVERAGE)["r/learnpython"]["status"] == "incomplete"
+
+
+def test_a_group_in_a_comment_that_did_not_fit_was_not_seen(fake_reddit, monkeypatch):
+    fake_reddit.pages[COMMENTS_URL] = comment_feed(
+        comment("c2", "1abc23", "/u/b", "Second [found: Bob].", 1), comment("c1", "1abc23", "/u/a", "First [found: Ada].", 2)
+    )
+    full_size = len(read_subreddit(subreddit="learnpython"))
+    monkeypatch.setattr(tools, "MIN_COMMENTS_PER_POST", 1)
+    monkeypatch.setattr(tools, "MAX_SUBREDDIT_CHARS", full_size - 1)
+    agent = reader()
+    read_subreddit(subreddit="learnpython", agent=agent)
+    assert [(group["text"], group["shown"]) for group in the_source(agent)["groups"]] == [("Ada", True), ("Bob", False)]
+
+
+def test_a_post_that_did_not_fit_is_remembered_as_never_seen(fake_reddit, monkeypatch):
+    fake_reddit.pages[LISTING_URL] = ATOM.replace(OLD, RECENT)
+    full_size = len(read_subreddit(subreddit="learnpython"))
+    monkeypatch.setattr(tools, "MIN_COMMENTS_PER_POST", 100)
+    monkeypatch.setattr(tools, "MAX_SUBREDDIT_CHARS", full_size - 1)
+    agent = reader()
+    result = json.loads(read_subreddit(subreddit="learnpython", agent=agent))
+
+    assert result["omitted"]["posts"] == 1
+    assert [source["shown"] for source in agent.state.get(tools.SOURCES).values()] == [True, False]
+
+
+def test_a_long_posts_trailer_is_taken_off_before_it_is_cut(fake_reddit):
+    trailer = " submitted by &lt;a href=&quot;https://www.reddit.com/user/a&quot;&gt; /u/a &lt;/a&gt;"
+    fake_reddit.pages[LISTING_URL] = body_of("x" * (tools.FEED_TEXT_CHARS - 5) + trailer)
+    [post] = json.loads(read_subreddit(subreddit="learnpython"))["posts"]
+    assert "submitted" not in post["text"] and "[...]" not in post["text"]
+
+
+def test_a_failing_group_finder_finds_nothing_and_stops_nothing(fake_reddit):
+    def broken(text):
+        raise RuntimeError("bug in a local tool")
+
+    agent = SimpleNamespace(state=AgentState(), group_finders=[broken])
+    read_subreddit(subreddit="learnpython", agent=agent)
+    assert the_source(agent)["groups"] == []

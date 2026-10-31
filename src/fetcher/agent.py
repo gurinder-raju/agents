@@ -59,7 +59,7 @@ def build_agent(recorder: TraceRecorder, prompt: str = "", report_required: bool
     # The plugin lists each skill's name and description in the system prompt, and adds a
     # `skills` tool the model calls to load a skill's full instructions when it needs them.
     skills = AgentSkills(skills=[d for d in SKILL_DIRS if Path(d).is_dir()])
-    local_tools, text_transforms = load_local_tools()
+    local_tools, text_transforms, group_finders = load_local_tools()
     agent = Agent(
         model=model,
         tools=[current_time, fetch_url, read_feed, read_subreddit, report_tool(prompt), *local_tools],
@@ -70,19 +70,24 @@ def build_agent(recorder: TraceRecorder, prompt: str = "", report_required: bool
     )
     # The read tools run these on every post, comment and feed entry before the model reads them.
     agent.text_transforms = text_transforms
+    agent.group_finders = group_finders
     return agent
 
 
-def load_local_tools(folder: Path = LOCAL_TOOL_DIR) -> tuple[list[Any], list[Callable[[str], str]]]:
+def load_local_tools(folder: Path = LOCAL_TOOL_DIR) -> tuple[list[Any], list[Callable[[str], str]], list[Callable[[str], list[dict]]]]:
     """Load your own tools from jobs/tools/, which git ignores, so they never reach the repository.
 
-    Each .py file there may define TOOLS, a list of @tool functions to give the model, and
+    Each .py file there may define TOOLS, a list of @tool functions to give the model;
     transform_text(text), which rewrites every post, comment and feed entry before the model reads
-    it: for example, decoding text that a community hides in a code the model can't read reliably.
+    it: for example, decoding text that a community hides in a code the model can't read reliably;
+    and find_groups(text), which lists what the transform marked in a rewritten text, so a job with a
+    link pattern can account for each one. Each group is a dict with text, lines (the text's own
+    line breaks, as a list), and start and end offsets.
     Files whose names start with _ or test_ are skipped. A file that fails to load is skipped with a warning.
     """
     tools: list[Any] = []
     transforms: list[Callable[[str], str]] = []
+    finders: list[Callable[[str], list[dict]]] = []
     for path in sorted(folder.glob("*.py")) if folder.is_dir() else []:
         if path.name.startswith(("_", "test_")):
             continue
@@ -96,7 +101,9 @@ def load_local_tools(folder: Path = LOCAL_TOOL_DIR) -> tuple[list[Any], list[Cal
         tools += list(getattr(module, "TOOLS", []))
         if callable(transform := getattr(module, "transform_text", None)):
             transforms.append(transform)
-    return tools, transforms
+        if callable(finder := getattr(module, "find_groups", None)):
+            finders.append(finder)
+    return tools, transforms, finders
 
 
 def unload_model(agent: Agent) -> None:

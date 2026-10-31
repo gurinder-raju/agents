@@ -25,8 +25,10 @@ gemma4:e4b peaks at about 11 GB of memory while it works, so fetcher unloads it 
 
 Skills live in `skills/<name>/SKILL.md`; put your own in `jobs/skills/`, which git ignores. Put your own
 tools in `jobs/tools/<name>.py`, which git also ignores: a file there can define `TOOLS`, a list of `@tool`
-functions for the model, and `transform_text(text)`, which rewrites every post, comment and feed entry
-before the model reads it.
+functions for the model; `transform_text(text)`, which rewrites every post, comment and feed entry
+before the model reads it; and `find_groups(text)`, which lists what that rewrite marked in a text, so a
+job with a link pattern can account for each one. A transform sees the whole text, and it's only cut to
+what the model reads after that.
 
 Ask for a report and the agent saves an HTML page of links, with your prompt and its criteria at the top,
 to `outputs/reports/<run_id>-<title>.html`. Like traces, reports are gitignored. Each match can have a

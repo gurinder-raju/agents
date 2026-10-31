@@ -74,15 +74,17 @@ def test_loads_local_tools_and_text_transforms(tmp_path):
         "from strands import tool\n\n"
         "@tool\ndef shout(text: str) -> str:\n    \"\"\"Upper-case text.\n\n    Args:\n        text: Any text.\n    \"\"\"\n    return text.upper()\n\n"
         "TOOLS = [shout]\n\n"
-        "def transform_text(text):\n    return text.replace('a', 'A')\n"
+        "def transform_text(text):\n    return text.replace('a', 'A')\n\n"
+        "def find_groups(text):\n    return [{'text': text, 'lines': [text], 'start': 0, 'end': len(text)}]\n"
     )
     (tmp_path / "broken.py").write_text("raise ImportError('missing dependency')\n")
     (tmp_path / "test_shout.py").write_text("raise AssertionError('tests are not tools')\n")
 
-    tools, transforms = agent_module.load_local_tools(tmp_path)
+    tools, transforms, finders = agent_module.load_local_tools(tmp_path)
     assert [t.tool_name for t in tools] == ["shout"]
     assert [transform("banana") for transform in transforms] == ["bAnAnA"]
+    assert [finder("x")[0]["lines"] for finder in finders] == [["x"]]
 
 
 def test_no_local_tools_folder_means_no_local_tools(tmp_path):
-    assert agent_module.load_local_tools(tmp_path / "missing") == ([], [])
+    assert agent_module.load_local_tools(tmp_path / "missing") == ([], [], [])

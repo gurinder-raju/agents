@@ -85,7 +85,7 @@ def fetch_url(url: str, links: str | None = None, agent: Any = None) -> str:
         return find_links(response.text, str(response.url), links)
     is_html = "html" in response.headers.get("content-type", "")
     text = html_to_text(response.text) if is_html else response.text
-    _remember_sources(agent, {url: {"title": None, "text": text}})
+    _remember_sources(agent, {url: {"text": text}})
     if len(text) > MAX_PAGE_CHARS:
         _remember_coverage(agent, url, "incomplete", f"{url}: read the first {MAX_PAGE_CHARS} of {len(text)} characters.")
         text = text[:MAX_PAGE_CHARS] + f"\n\n[truncated: showing {MAX_PAGE_CHARS} of {len(text)} characters]"
@@ -113,9 +113,9 @@ def read_feed(url: str, since_hours: float | None = None, max_entries: int = 25,
         cutoff = datetime.now(UTC) - timedelta(hours=since_hours)
         entries = [e for e in entries if e["published"] is None or e["published"] >= cutoff]
 
-    kept = [entry | {"title": _transform(agent, entry["title"] or ""), "text": _transform(agent, entry["text"])}
-            for entry in entries[:max_entries]]
-    _remember_sources(agent, {e["link"]: {"title": e["title"], "text": f"{e['title']}\n{e['text']}"} for e in kept})
+    # Local transforms see each whole text. Only then is it cut to what the model reads.
+    entries = [entry | {"title": _transform(agent, entry["title"] or ""), "text": _transform(agent, entry["text"])} for entry in entries]
+    kept = [entry | {"text": _shorten(entry["text"], FEED_TEXT_CHARS)} for entry in entries[:max_entries]]
     while True:
         result = json.dumps(
             {"feed": title, "entries": kept, "omitted": len(entries) - len(kept)}, default=_iso, ensure_ascii=False
@@ -124,8 +124,22 @@ def read_feed(url: str, since_hours: float | None = None, max_entries: int = 25,
             break
         kept = kept[:-1]
     left_out = len(entries) - len(kept)
+    found = {
+        entry["link"]: {
+            "title": entry["title"],
+            "text": f"{entry['title']}\n{_shorten(entry['text'], FEED_TEXT_CHARS)}",
+            "read_from": url,
+            "shown": number < len(kept),
+            "groups": _entry_groups(agent, entry, number < len(kept)),
+        }
+        for number, entry in enumerate(entries)
+    }
+    _remember_sources(agent, found)
+    cut_groups = _groups_cut_off(found)
     line = f"{title or url}: {len(kept)} entries" + (f", and {left_out} more that were left out." if left_out else ".")
-    _remember_coverage(agent, url, "incomplete" if left_out else "complete", line)
+    if cut_groups:
+        line += f" {cut_groups} groups a local tool found were cut off before the model read them."
+    _remember_coverage(agent, url, "incomplete" if left_out or cut_groups else "complete", line)
     return result
 
 
@@ -207,30 +221,42 @@ def present_posts(
 ) -> str:
     """Turn a subreddit's posts into what the model reads: rewritten by any local text transforms,
     numbered, remembered for write_report, and cut to fit the model's context window."""
+    # Local transforms see each whole text. Only then is it cut to what the model reads.
     for post in posts:
         post["title"] = _transform(agent, post["title"])
         post["text"] = _transform(agent, post["text"])
-        post["comments"] = [
-            comment | {"text": _shorten(_transform(agent, comment["text"]), COMMENT_CHARS)} for comment in post["comments"]
-        ]
+        post["comments"] = [comment | {"text": _transform(agent, comment["text"])} for comment in post["comments"]]
     if sort == "comments":
         posts.sort(key=lambda post: post["comment_count"], reverse=True)
     # A short id per post, such as Python-3, for write_report: small models often mangle the long
     # ids in Reddit links when they copy them.
     posts = [{"id": f"{name}-{number}"} | post for number, post in enumerate(posts, 1)]
-
-    _remember_sources(agent, {
+    cut = [
+        post | {
+            "text": _shorten(post["text"], FEED_TEXT_CHARS),
+            "comments": [comment | {"text": _shorten(comment["text"], COMMENT_CHARS)} for comment in post["comments"]],
+        }
+        for post in posts
+    ]
+    result = _fit_subreddit(name, cut, 0, comments_complete)
+    read = json.loads(result)
+    omitted = read["omitted"]
+    seen = {post["id"]: post for post in read["posts"]}
+    found = {
         post["link"]: {
             "id": post["id"],
             "title": post["title"],
             "comment_count": post["comment_count"],
-            "text": "\n".join([post["title"], post["text"], *(c["text"] for c in post["comments"])]),
+            "text": "\n".join([short["title"], short["text"], *(c["text"] for c in short["comments"])]),
+            "read_from": f"r/{name}",
+            "shown": post["id"] in seen,
+            "groups": _post_groups(agent, post, seen.get(post["id"])),
         }
-        for post in posts
-    })
+        for post, short in zip(posts, cut)
+    }
+    _remember_sources(agent, found)
     _remember_post_ids(agent, {post["id"]: post["link"] for post in posts})
-    result = _fit_subreddit(name, posts, 0, comments_complete)
-    omitted = json.loads(result)["omitted"]
+    cut_groups = _groups_cut_off(found)
     coverage = (
         f"r/{name}: {len(posts)} posts and {sum(post['comment_count'] for post in posts)} comments from the last "
         f"{since_hours:g} hours."
@@ -241,7 +267,9 @@ def present_posts(
         coverage += f" Comment counts may be low: the comment feed stopped after {MAX_COMMENT_PAGES} pages."
     if not posts_complete:
         coverage += f" The post list stopped at {LISTING_POSTS} posts, so older posts in that window weren't read."
-    read_in_full = posts_complete and comments_complete and not omitted["posts"] and not omitted["comments"]
+    if cut_groups:
+        coverage += f" {cut_groups} groups a local tool found were cut off before the model read them."
+    read_in_full = posts_complete and comments_complete and not omitted["posts"] and not omitted["comments"] and not cut_groups
     _remember_coverage(agent, f"r/{name}", "complete" if read_in_full else "incomplete", coverage)
     return result
 
@@ -254,6 +282,46 @@ def _transform(agent: Any, text: str) -> str:
         except Exception as error:  # a private transform's bug shouldn't stop the run
             _progress(f"text transform {getattr(transform, '__module__', transform)} failed: {error}")
     return text
+
+
+def _find_groups(agent: Any, text: str, field: str, seen_chars: int) -> list[dict[str, Any]]:
+    """What the local tools marked in one text (from jobs/tools/), with where each is and if the model saw it.
+
+    `seen_chars` is how much of the text the model got. One that fails finds nothing, like a failed transform.
+    """
+    groups = []
+    for finder in getattr(agent, "group_finders", None) or []:
+        try:
+            groups += [
+                {key: group[key] for key in ("text", "lines", "start", "end")} | {"field": field, "shown": group["end"] <= seen_chars}
+                for group in finder(text)
+            ]
+        except Exception as error:  # a private tool's bug shouldn't stop the run
+            _progress(f"group finder {getattr(finder, '__module__', finder)} failed: {error}")
+    return groups
+
+
+def _post_groups(agent: Any, post: dict[str, Any], seen: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """The groups in a whole post. `seen` is the post as the model got it, if it did."""
+    comments_seen = len(seen["comments"]) if seen else 0
+    fields = [("title", post["title"], len(post["title"]) if seen else 0), ("text", post["text"], FEED_TEXT_CHARS if seen else 0)]
+    fields += [
+        (f"comments[{number}]", comment["text"], COMMENT_CHARS if number < comments_seen else 0)
+        for number, comment in enumerate(post["comments"])
+    ]
+    return [group for field, text, seen_chars in fields for group in _find_groups(agent, text, field, seen_chars)]
+
+
+def _entry_groups(agent: Any, entry: dict[str, Any], seen: bool) -> list[dict[str, Any]]:
+    return [
+        *_find_groups(agent, entry["title"], "title", len(entry["title"]) if seen else 0),
+        *_find_groups(agent, entry["text"], "text", FEED_TEXT_CHARS if seen else 0),
+    ]
+
+
+def _groups_cut_off(found: dict[str, dict[str, Any]]) -> int:
+    """How many groups the model didn't get in posts that it did. The ones in posts it never got go with those posts."""
+    return sum(not group["shown"] for facts in found.values() if facts["shown"] for group in facts["groups"])
 
 
 def _read_comment_feed(name: str, cutoff: datetime) -> tuple[list[dict[str, Any]], bool]:
@@ -639,8 +707,11 @@ def _closest_existing_page(client: httpx.Client, url: str) -> str | None:
     return None
 
 
-# Key in the agent's state for what the read tools returned, by link, so write_report can check
-# the report against it. Strands passes the running agent to tools that have an `agent` parameter.
+# Key in the agent's state for what the read tools returned, by link, so write_report can check the
+# report against it and account for what was found. As well as the facts it checks against, each has
+# `read_from`, the source it was found in, unless it's a page fetched on its own; `shown`, whether the
+# model got it at all; and `groups`, whatever the local tools marked in it, each with its text, lines,
+# `field`, `start`, `end` and `shown`. Strands passes the running agent to tools that have an `agent` parameter.
 SOURCES = "sources"
 
 # Strands runs a reply's tool calls at the same time, and each update below reads the state, changes it
@@ -653,8 +724,17 @@ def _remember_sources(agent: Any, sources: dict[str | None, dict[str, Any]]) -> 
         return
     with _STATE_LOCK:
         known = agent.state.get(SOURCES) or {}
-        known.update({canonical_link(link): source for link, source in sources.items() if link})
+        for link, source in sources.items():
+            if link:
+                key = canonical_link(link)
+                known[key] = _read_again(known[key], source) if key in known else source
         agent.state.set(SOURCES, known)
+
+
+def _read_again(earlier: dict[str, Any], later: dict[str, Any]) -> dict[str, Any]:
+    """What's known of a source read twice, such as a post whose page was then fetched: both count."""
+    text = later["text"] if earlier["text"] in later["text"] else f"{earlier['text']}\n{later['text']}"
+    return earlier | later | {"text": text, "shown": earlier.get("shown", True) or later.get("shown", True)}
 
 
 # Key in the agent's state for how each read went, by source, so the report says what it covers and an
@@ -885,7 +965,7 @@ def _parse_time(value: str | None) -> datetime | None:
 
 
 def _entry_text(html: str | None) -> str:
-    return _shorten(html_to_text(html or ""), FEED_TEXT_CHARS)
+    return html_to_text(html or "")
 
 
 MAX_LINKS = 25

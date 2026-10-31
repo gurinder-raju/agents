@@ -80,6 +80,28 @@ def test_reads_ending_together_are_all_recorded():
     assert len(agent.state.get(tools.COVERAGE)) == 8
 
 
+def test_a_source_read_twice_keeps_what_the_first_read_knew():
+    agent = SimpleNamespace(state=AgentState())
+    link = "https://www.reddit.com/r/Python/comments/1a/post/"
+    post = {"id": "Python-1", "title": "A post", "text": "A post\nIts body.", "read_from": "r/Python", "shown": False, "groups": []}
+    tools._remember_sources(agent, {link: post})
+    tools._remember_sources(agent, {link: {"text": "The page around it."}})
+
+    [source] = agent.state.get(tools.SOURCES).values()
+    assert source["id"] == "Python-1" and source["read_from"] == "r/Python"
+    assert source["text"] == "A post\nIts body.\nThe page around it."  # a quote can come from either
+    assert source["shown"] is True
+
+
+def test_a_source_read_again_the_same_way_does_not_pile_up():
+    agent = SimpleNamespace(state=AgentState())
+    link = "https://example.com/entry"
+    for _ in range(3):
+        tools._remember_sources(agent, {link: {"title": "An entry", "text": "An entry\nIts text.", "read_from": "https://example.com/feed", "shown": True, "groups": []}})
+    [source] = agent.state.get(tools.SOURCES).values()
+    assert source["text"] == "An entry\nIts text."
+
+
 def test_find_links_returns_matching_links_in_page_order():
     html = """<a href="/downloads/release/python-3152/">Python 3.15.2</a>
     <a href="/downloads/release/python-3139/">Python 3.13.9</a> <a href="/ftp/python/3.13.9/">Download</a>

@@ -87,6 +87,37 @@ def test_read_feed_records_a_feed_it_could_not_parse(monkeypatch):
     assert agent.state.get(tools.COVERAGE)["https://example.com/feed"]["status"] == "failed"
 
 
+def test_read_feed_remembers_what_it_found_and_what_the_model_got(monkeypatch):
+    monkeypatch.setattr(tools, "http_get", lambda url: httpx.Response(200, text=ATOM))
+    agent = SimpleNamespace(state=AgentState())
+    read_feed(url="https://example.com/feed", max_entries=1, agent=agent)
+
+    first, second = agent.state.get(tools.SOURCES).values()
+    assert first["read_from"] == second["read_from"] == "https://example.com/feed"
+    assert first["shown"] is True and second["shown"] is False
+
+
+def test_read_feed_runs_local_tools_on_the_whole_entry_and_then_cuts_it(monkeypatch):
+    long_body = "x " * tools.FEED_TEXT_CHARS + "[found: Late]"
+    feed = ATOM.replace("Should I use venv &amp;amp; pip or uv?", long_body)
+    monkeypatch.setattr(tools, "http_get", lambda url: httpx.Response(200, text=feed))
+    seen = []
+
+    def finder(text):
+        seen.append(text)
+        return [{"text": "Late", "lines": ["Late"], "start": text.index("[found"), "end": len(text)}] if "[found" in text else []
+
+    agent = SimpleNamespace(state=AgentState(), group_finders=[finder])
+    result = json.loads(read_feed(url="https://example.com/feed", agent=agent))
+
+    assert "found" not in result["entries"][0]["text"] and result["entries"][0]["text"].endswith(" [...]")
+    assert any(text.endswith("[found: Late]") for text in seen)
+    [group] = list(agent.state.get(tools.SOURCES).values())[0]["groups"]
+    assert group["shown"] is False
+    read = agent.state.get(tools.COVERAGE)["https://example.com/feed"]
+    assert read["status"] == "incomplete" and "cut off before the model read them" in read["line"]
+
+
 def test_rate_limits_are_shared_through_a_file_per_host(tmp_path, monkeypatch):
     monkeypatch.setattr(tools, "RATE_LIMIT_DIR", tmp_path)
     exhausted = httpx.Response(200, headers={"x-ratelimit-remaining": "0.0", "x-ratelimit-reset": "30"})
