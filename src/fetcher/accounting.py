@@ -21,7 +21,7 @@ can't wave through something nobody looked at.
 from collections import Counter, defaultdict
 from typing import Any
 
-from .report import canonical_link, contains_words, count_records
+from .report import canonical_link, count_records, lines_holding
 
 
 def source_key(name: str) -> str:
@@ -123,16 +123,19 @@ def _group_verdict(group: dict[str, Any], records: list[dict[str, Any]], rows: l
 
 
 def _group_parts(group: dict[str, Any], records: list[dict[str, Any]], rows: list[dict[str, Any]]) -> list[tuple[str, str]]:
-    """Use the supplied lines; literal slashes and prose are never split into guessed values."""
+    """Use the supplied lines; literal slashes and prose are never split into guessed values.
+
+    A value settles every line it touches, so one that runs over a line break settles each line it's on.
+    """
     parts = list(dict.fromkeys(line for line in group["lines"] if line.strip())) or [group["text"]]
     result = []
-    for text in parts:
+    for number, text in enumerate(parts):
         if any(
-            record["fill"] is None or (group in record.get("groups", ()) and contains_words(text, record["fill"]))
+            record["fill"] is None or (group in record.get("groups", ()) and number in lines_holding(parts, record["fill"]))
             for record in records
         ):
             verdict = "rendered"
-        elif any(_explains(row, group | {"text": text}) for row in rows):
+        elif any(_explains(row, parts, number) for row in rows):
             verdict = "rejected"
         else:
             verdict = "unaccounted" if group["shown"] else "truncated"
@@ -140,14 +143,14 @@ def _group_parts(group: dict[str, Any], records: list[dict[str, Any]], rows: lis
     return result
 
 
-def _explains(row: dict[str, Any], group: dict[str, Any]) -> bool:
-    """A row with a value explains that value, and a post's row with none explains all of that post.
+def _explains(row: dict[str, Any], parts: list[str], number: int) -> bool:
+    """A row with a value explains the lines that value is on, and a post's row with none explains all of that post.
 
     An empty fill doesn't: it says the post has no value, which is no answer for a value that's there.
     """
     if row.get("no_value"):
         return False
-    return contains_words(group["text"], row["value"]) if row.get("value") else row["scope"] == "post"
+    return number in lines_holding(parts, row["value"]) if row.get("value") else row["scope"] == "post"
 
 
 def _short_name(link: str, facts: dict[str, Any]) -> str:

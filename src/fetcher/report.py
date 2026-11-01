@@ -408,6 +408,22 @@ def contains_words(text: str, phrase: str) -> bool:
     return f" {_words(phrase)} " in f" {_words(text)} "
 
 
+def lines_holding(lines: list[str], phrase: str) -> set[int]:
+    """The positions of the lines that hold `phrase`, or that it runs through if it crosses a line break.
+
+    A value can't hold a line break, so the model writes one that crosses a break on one line. It
+    matches as contains_words does.
+    """
+    found = {number for number, line in enumerate(lines) if contains_words(line, phrase)}
+    words = [(word, number) for number, line in enumerate(lines) for word in _words(line).split()]
+    wanted = _words(phrase).split()
+    for start in range(len(words) - len(wanted) + 1):
+        stretch = words[start:start + len(wanted)]
+        if wanted and [word for word, _ in stretch] == wanted:
+            found |= {number for _, number in stretch}
+    return found
+
+
 def canonical_link(url: str) -> str:
     """The same page's link, written the same way: no scheme, www. or old., trailing slash or fragment."""
     parts = urlsplit(url.strip())

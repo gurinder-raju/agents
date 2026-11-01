@@ -47,8 +47,9 @@ allowed-tools: read_subreddit read_feed fetch_url write_report
 6. Call `write_report` once, with a short `title`, your `criteria`, every match as `items`, and your
    `left_out` rows. If the user wants the most commented posts first, add `sort="comments"`. If
    nothing matched, call it anyway with an empty list. If it answers that it saved nothing, fix
-   everything it lists and call it again. If it says a quote or link is wrong, or that something has
-   no item or left_out row, fix that and call it again with the same title and every item.
+   everything it lists and call it again. If it says a quote or link is wrong, that a left_out row
+   has to change, or that something has no item or left_out row, fix that and call it again with the
+   same title and every item.
 7. Only then reply: a list in your reply isn't a report. Give the report's path, how many matches it
    has, and from which sources. If a tool said posts or comments were omitted, `comments_complete` is
    false, a source couldn't be read, or `write_report` says the report is partial, say so.

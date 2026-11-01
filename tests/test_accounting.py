@@ -1,8 +1,10 @@
+from pathlib import Path
+
 import pytest
 
 from fetcher import tools
 from fetcher.accounting import source_key
-from fetcher.report import ReportError, canonical_link, contains_words
+from fetcher.report import ReportError, canonical_link, contains_words, lines_holding
 from fetcher.tools import requested_sources, write_report
 from test_report import report_dir, tool_context  # noqa: F401  (report_dir is a fixture)
 
@@ -232,16 +234,51 @@ def test_remaining_lines_can_be_reported_or_explicitly_rejected(report_dir):
         assert report["unexplained"] == []
 
 
-def test_post_ids_in_the_excluded_value_field_are_actionable_validation_errors(report_dir):
-    context = context_for(PATTERN, [post(1), post(2)])
-    with pytest.raises(ReportError) as caught:
-        write_report(title="t", criteria="c", items=[], left_out=[
-            {"source": "r/Python", "value": "Python-1", "reason": "No match."},
-            {"source": "r/Python", "value": "Python-2", "reason": "No match."},
-        ], tool_context=context)
-    assert len(caught.value.errors) == 2
-    assert all(f"left_out[{i}].value:" in error and "put the post id in source" in error for i, error in enumerate(caught.value.errors))
-    assert list(report_dir.iterdir()) == []
+@pytest.mark.parametrize("lines", ["Ada\nLovelace", "Name: Ada\nLovelace (1815)"])
+def test_a_value_that_runs_over_a_line_break_settles_every_line_it_touches(report_dir, lines):
+    report, _ = report_of(PATTERN, [post(1, group(lines))], [item(1, fill="Ada Lovelace", quote=lines)])
+    [row] = report["sources"]
+    assert row["groups"]["rendered"] == 1 and report["unexplained"] == []
+    assert report["warnings"] == ["links_not_checked"]
+
+
+def test_a_line_that_a_split_value_does_not_touch_still_needs_an_answer(report_dir):
+    report, _ = report_of(PATTERN, [post(1, group("Ada\nLovelace\n1234"))], [item(1, fill="Ada Lovelace")])
+    assert report["unexplained"] == ["Python-1: 1234"]
+
+
+@pytest.mark.parametrize("value", ["Ada Lovelace", "Ada | Lovelace"])  # the second is how a reply prints the two lines
+def test_a_left_out_value_can_run_over_a_line_break_too(report_dir, value):
+    rows = [{"source": "Python-1", "value": value, "reason": "Not a target."}]
+    report, _ = report_of(PATTERN, [post(1, group("Ada\nLovelace"))], left_out=rows)
+    assert report["sources"][0]["groups"]["rejected"] == 1 and report["unexplained"] == []
+
+
+def test_lines_holding_finds_a_phrase_on_a_line_or_over_a_break():
+    lines = ["Name: Ada", "Lovelace (1815)", "Ada"]
+    assert lines_holding(lines, "ada") == {0, 2}
+    assert lines_holding(lines, "Ada Lovelace") == {0, 1}
+    assert lines_holding(lines, "Lovelace Ada") == set()  # 1815 is between them
+    assert lines_holding(lines, "Grace") == set()
+
+
+def test_a_post_id_in_the_value_field_leaves_a_partial_report_that_says_what_to_change(report_dir):
+    report, reply = report_of(PATTERN, [post(1), post(2)], left_out=[
+        {"source": "r/Python", "value": "Python-1", "reason": "No match."},
+        {"source": "r/Python", "value": "Python-2", "reason": "No match."},
+    ])
+    assert "invalid_left_out" in report["warnings"] and Path(report["path"]).is_file()
+    errors = report["invalid_left_out"]
+    assert len(errors) == 2
+    assert all(f"left_out[{i}].value:" in error and "put the post id in source" in error for i, error in enumerate(errors))
+    assert "these left_out rows have to change" in reply and "call write_report again" in reply
+
+
+def test_a_long_list_of_bad_rows_is_cut_to_what_a_model_can_act_on(report_dir):
+    rows = [{"source": "r/Python", "value": f"Python-{n}", "reason": "No match."} for n in range(1, 31)]
+    report, _ = report_of(PATTERN, [post(n) for n in range(1, 31)], left_out=rows)
+    assert len(report["invalid_left_out"]) == tools.MAX_NAMES + 1
+    assert report["invalid_left_out"][-1] == f"and {30 - tools.MAX_NAMES} more rows like these"
 
 
 def test_a_post_id_can_still_be_a_literal_value_in_recorded_source_text(report_dir):
@@ -257,10 +294,11 @@ def test_a_post_id_can_still_be_a_literal_value_in_recorded_source_text(report_d
     {"source": "Python-1", "value": "Ada", "reason": "Exclude the value."},
     {"source": "r/Python", "value": "Ada", "reason": "Exclude the value."},
 ])
-def test_reporting_and_explicitly_excluding_the_same_post_or_value_is_rejected(report_dir, exclusion):
-    context = context_for(PATTERN, [post(1, group("Ada"))])
-    with pytest.raises(ReportError, match=r"left_out\[0\].source: this exclusion also appears in items"):
-        write_report(title="t", criteria="c", items=[item(1, fill="Ada")], left_out=[exclusion], tool_context=context)
+def test_reporting_and_explicitly_excluding_the_same_post_or_value_is_flagged_and_keeps_the_items(report_dir, exclusion):
+    report, reply = report_of(PATTERN, [post(1, group("Ada"))], [item(1, fill="Ada")], [exclusion])
+    assert report["invalid_left_out"][0].startswith("left_out[0].source: this exclusion also appears in items")
+    assert "invalid_left_out" in report["warnings"] and "this exclusion also appears in items" in reply
+    assert [record["fill"] for record in report["items"]] == ["Ada"] and Path(report["path"]).is_file()
 
 
 def test_wrong_post_values_point_to_recorded_alternatives_without_reassigning_them(report_dir):

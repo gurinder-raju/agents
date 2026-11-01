@@ -414,7 +414,7 @@ def _save_report(
     reads = list((agent.state.get(COVERAGE) or {}).values())
     names = {source_key(name) for name in [*requested, *(read["source"] for read in reads)]}
     left_out = _place_left_out(left_out, names, post_ids, sources)
-    _validate_left_out(left_out, kept, post_ids, sources)
+    invalid_rows = _left_out_errors(left_out, kept, post_ids, sources)
     records, repeats = combine_values(normalize_items(kept))
     unmatched_quotes = match_sources(records, sources)
     made_up_values = _check_filled_values(records, sources)
@@ -429,7 +429,8 @@ def _save_report(
     left_out += [_no_value_row(row, sources) for row in without_value]
     ledger = account_sources(requested, reads, sources, records, left_out, bool(templates))
 
-    problems = _problems(records, unknown_posts, made_up_values, unmatched_quotes, unsourced) | _accounting_problems(ledger, left_out)
+    problems = _problems(records, unknown_posts, made_up_values, unmatched_quotes, unsourced)
+    problems |= _accounting_problems(ledger, left_out, invalid_rows)
     gaps = [read["line"] for read in reads if read["status"] != "complete"]
     other_warnings = {
         "no_value": without_value,
@@ -467,6 +468,7 @@ def _save_report(
         "warnings": warnings,
         "skipped": {"unknown_post": len(unknown_posts), "no_value": len(without_value), "duplicate": repeats},
         "unexplained": _unexplained(ledger),
+        "invalid_left_out": invalid_rows,
         "sources": ledger,
         "left_out": left_out,
         "items": records,
@@ -543,13 +545,14 @@ def _post_row(link: str, sources: dict[str, Any]) -> dict[str, Any]:
     return {"scope": "post", "key": key, "link": link, "title": sources.get(key, {}).get("title")}
 
 
-def _validate_left_out(
+def _left_out_errors(
     rows: list[dict[str, Any]], items: list[dict[str, str]], post_ids: dict[str, str], sources: dict[str, Any]
-) -> None:
-    """Validate reference roles and explicit contradictions before saving or checking links.
+) -> list[str]:
+    """The left_out rows that can't stand: a post named in the wrong field, or a row that contradicts an item.
 
     A source-wide rejection covers only the rest of that source. A post-wide rejection, or a
-    rejection of the same value, cannot also report that post/value in this call.
+    rejection of the same value, cannot also report that post/value in this call. A bad row doesn't
+    cost the report: it's saved as partial, and the model is told what to change.
     """
     known_ids = {post.casefold() for post in post_ids}
     errors = []
@@ -579,8 +582,8 @@ def _validate_left_out(
                     "remove the exclusion or name only a value that is not being reported"
                 )
                 break
-    if errors:
-        raise ReportError("validation", errors)
+    more = len(errors) - MAX_NAMES
+    return errors[:MAX_NAMES] + ([f"and {more} more rows like these"] if more > 0 else [])
 
 
 def _no_value_row(item: dict[str, str], sources: dict[str, Any]) -> dict[str, Any]:
@@ -616,11 +619,12 @@ def _problems(
     return {code: sentence for code, (found, sentence) in checks.items() if found}
 
 
-def _accounting_problems(ledger: list[dict[str, Any]], left_out: list[dict[str, Any]]) -> dict[str, str]:
+def _accounting_problems(ledger: list[dict[str, Any]], left_out: list[dict[str, Any]], invalid_rows: list[str]) -> dict[str, str]:
     """What the report doesn't explain, as warning codes and sentences. Input that was cut off isn't here: its read says so."""
     posts, groups, not_read = _unaccounted(ledger)
     strays = [row["source"] for row in left_out if row["scope"] is None]
     checks = {
+        "invalid_left_out": (invalid_rows, f"these left_out rows have to change: {' | '.join(invalid_rows)}"),
         "unaccounted_candidates": (posts, f"no item or left_out row covers these posts: {'; '.join(posts)}"),
         "unaccounted_values": (groups, f"no item or left_out row covers these values: {'; '.join(groups)}"),
         "source_not_read": (not_read, f"these sources were asked for but not read, and no left_out row says why: {', '.join(not_read)}"),
