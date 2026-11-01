@@ -117,13 +117,13 @@ def _post_verdict(facts: dict[str, Any], records: list[dict[str, Any]], post_row
 
 
 def _group_verdict(group: dict[str, Any], records: list[dict[str, Any]], rows: list[dict[str, Any]]) -> str:
-    """A group is accounted for only when every decoded line has a disposition."""
+    """A group is accounted for only when every line has a disposition."""
     verdicts = {verdict for _, verdict in _group_parts(group, records, rows)}
     return next(verdict for verdict in ("unaccounted", "truncated", "rendered", "rejected") if verdict in verdicts)
 
 
 def _group_parts(group: dict[str, Any], records: list[dict[str, Any]], rows: list[dict[str, Any]]) -> list[tuple[str, str]]:
-    """Use the decoder's explicit lines; literal slashes and prose are never split into guessed values."""
+    """Use the supplied lines; literal slashes and prose are never split into guessed values."""
     parts = list(dict.fromkeys(line for line in group["lines"] if line.strip())) or [group["text"]]
     result = []
     for text in parts:

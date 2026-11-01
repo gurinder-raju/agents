@@ -53,7 +53,7 @@ def test_records_model_errors(tmp_path):
     assert "ollama not running" in line["error"]
 
 
-def test_source_snapshots_keep_groups_that_were_hidden_from_the_model(tmp_path):
+def test_source_snapshots_keep_groups_omitted_from_the_model_input(tmp_path):
     recorder = TraceRecorder(tmp_path)
     group = {"text": "Hidden value", "lines": ["Hidden value"], "start": 600, "end": 612, "field": "comments[0]", "shown": False}
     sources = {"example.invalid/post": {"id": "Example-1", "text": "Visible prefix", "shown": True, "groups": [group]}}

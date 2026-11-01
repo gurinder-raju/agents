@@ -25,7 +25,7 @@ allowed-tools: read_subreddit read_feed fetch_url write_report
        its comments. If the post has no value, use an empty string, and the item is left out and counted.
      - `description`: one sentence on why it matched
      - `quote`: the exact words from the post or its comments that match, copied word for word
-     Cover every decoded line in a marked group with an item or an explicit exclusion. Keep literal
+     Cover every line in a multi-line input group with an item or an explicit exclusion. Keep literal
      slashes inside values; do not split prose or slash-containing names into guessed values.
    - Otherwise an item has `description` and `quote`, and one of:
      - `post`: the post's `id` from read_subreddit, such as `Python-3`; the report builds the link from it.

@@ -214,14 +214,14 @@ def test_every_group_in_a_post_has_to_be_reported_or_explained(report_dir):
     assert report["unexplained"] == ["Python-1: Cy"]
 
 
-def test_every_decoded_line_of_a_group_needs_a_disposition(report_dir):
+def test_every_line_of_a_group_needs_a_disposition(report_dir):
     report, _ = report_of(PATTERN, [post(1, group("Ada\n1234"))], [item(1, fill="Ada")])
     [row] = report["sources"]
     assert row["groups"]["unaccounted"] == 1 and report["unexplained"] == ["Python-1: 1234"]
     assert report["items"][0]["groups"][0]["lines"] == ["Ada", "1234"]
 
 
-def test_remaining_decoded_lines_can_be_reported_or_explicitly_rejected(report_dir):
+def test_remaining_lines_can_be_reported_or_explicitly_rejected(report_dir):
     posts = [post(1, group("Ada\n1234"))]
     for items, left_out in [
         ([item(1, fill="Ada"), item(1, fill="1234")], []),

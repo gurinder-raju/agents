@@ -102,7 +102,7 @@ class TraceRecorder(HookProvider):
             self._record_report(event)
         elif tool in {"read_subreddit", "read_feed", "fetch_url"}:
             # The tool result may be shortened. Keep the locally remembered inventory too, including
-            # groups hidden from the model, so truncation and evidence checks can be reconstructed.
+            # groups omitted from the model input by size limits, so the counts can be checked.
             self._write(
                 "source_snapshot", tool_use_id=event.tool_use["toolUseId"],
                 sources=event.agent.state.get(SOURCES) or {}, reads=event.agent.state.get(COVERAGE) or {},
