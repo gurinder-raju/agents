@@ -49,10 +49,11 @@ is labelled with the value. The page shows a post once, with each of its values 
 same post and value keep all their quotes, and only an exact repeat is dropped.
 
 `left_out` says why whatever the model read isn't in `items`: a row with a source's name covers the rest of
-its posts, a row with a post's id covers that post, and a row with `value` as well covers that value.
-For a whole-post exclusion put its ID in `source`, not `value`. A row with a post's id in `value`, or
-one that contradicts an item, doesn't cost the report: it's saved as partial, and the reply tells the
-model what to change.
+its posts, a row with a post's id covers the unreported rest of that post, and a row with `value` as
+well excludes that particular value. A post's row can sit beside items for that post: rendered values
+stay rendered, and the row explains the other values without one row per line. Put the post's ID in
+`source`, not `value`. A row with a post's id in `value`, or one explicitly excluding a reported value,
+doesn't cost the report: it's saved as partial, and the reply tells the model what to change.
 If an input group has several lines, each line needs an item or an explicit exclusion, and a value that
 runs over a line break settles every line it touches. Literal slashes are preserved. Quotes that repeat
 generated search links and values found only in a different recorded post remain partial-report warnings,
@@ -64,7 +65,12 @@ For a job that has to produce a report, pass `--report-required`. Its instructio
 the link-report skill is available, its full instructions are loaded before the first model call and
 their content hash is recorded in the trace. When the agent returns, the command line looks for this
 run's file, and if it isn't there, it leaves something the model read unexplained, or it has a left_out
-row that can't stand, asks the model once more to finish. The exit status tells a script what happened:
+row that can't stand, asks the model once more to finish.
+
+The finishing request contains only fixed application instructions. Source-derived diagnostics remain
+in the earlier tool results and are treated as data, rather than copied into a new user instruction.
+
+The exit status tells a script what happened:
 
 | Exit | Outcome | Meaning |
 | --- | --- | --- |

@@ -83,9 +83,9 @@ LINK_ITEM = ItemContract(
 LEFT_OUT = ItemContract(
     fields={
         "source": "What you're leaving out: a source you read, such as r/Python, for the rest of its posts, or "
-        "one post's id or link.",
+        "one post's id or link for the rest of that post, including beside items for the same post.",
         "value": "Only for one value you saw in that post and aren't reporting, as it's written there. Leave it out "
-        "for a whole post or source.",
+        "to explain the unreported remainder of a post or source.",
         "reason": "One sentence on why it isn't in items.",
     },
     required=("source", "reason"),
@@ -133,8 +133,9 @@ def report_schema(contract: ItemContract) -> dict[str, Any]:
                 "left_out": {
                     "type": "array",
                     "description": "Why whatever you read isn't in items, as flat objects of strings with only these "
-                    f"fields: {', '.join(LEFT_OUT.fields)}. One row naming a source covers the rest of its posts. A value "
-                    "you saw and aren't reporting needs a row of its own, with its post as source.",
+                    f"fields: {', '.join(LEFT_OUT.fields)}. Without value, a source row covers its other posts, "
+                    "but not their unreported values; a post row covers the remaining values of that post. "
+                    "Include value only to exclude that particular value.",
                     "items": _row_schema(LEFT_OUT),
                 },
             },

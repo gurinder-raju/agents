@@ -144,9 +144,10 @@ def _group_parts(group: dict[str, Any], records: list[dict[str, Any]], rows: lis
 
 
 def _explains(row: dict[str, Any], parts: list[str], number: int) -> bool:
-    """A row with a value explains the lines that value is on, and a post's row with none explains all of that post.
+    """A value row explains its lines; an unqualified post row explains the unreported remainder.
 
     An empty fill doesn't: it says the post has no value, which is no answer for a value that's there.
+    Reported lines take precedence in _group_parts, so this never rejects the post's rendered values.
     """
     if row.get("no_value"):
         return False
