@@ -39,10 +39,11 @@ allowed-tools: read_subreddit read_feed fetch_url write_report
    - `source` and `reason`: for the rest of a source, its name, as in
      `{"source": "r/Python", "reason": "The other posts aren't about uv."}`, or for one post, its id.
    - `value`, as well, for a value you saw and aren't reporting, as in
-     `{"source": "Python-3", "value": "Ada", "reason": "It's a character in a story."}`. A row for the
-     whole source doesn't cover those, so each needs a row of its own.
-   For a whole-post exclusion, put the post ID in `source` and omit `value`. Never put a post ID
-   in `value` to name the excluded post. Do not both report and exclude the same post/value.
+     `{"source": "Python-3", "value": "Ada", "reason": "It's a character in a story."}`.
+   To explain the rest of a post, put its ID in `source` and omit `value`. This row can sit beside
+   items for that post: those items stay reported, and the row explains only what remains.
+   A row for the whole source covers its other posts, but not unexplained values in them.
+   Never put a post ID in `value` to name the excluded post, or explicitly exclude a value in `items`.
    If the user named a source and you didn't read it, it needs a row too.
 6. Call `write_report` once, with a short `title`, your `criteria`, every match as `items`, and your
    `left_out` rows. If the user wants the most commented posts first, add `sort="comments"`. If

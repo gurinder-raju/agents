@@ -205,6 +205,45 @@ def test_a_row_for_one_value_leaves_the_others_unexplained(report_dir):
     assert report["sources"][0]["unaccounted"]["groups"] == ["Python-1: Bob"]
 
 
+def test_a_post_row_covers_the_rest_beside_a_reported_item(report_dir):
+    posts = [post(1, group("Ada\nBob"), group("Cy"))]
+    report, _ = report_of(PATTERN, posts, [item(1, fill="Ada")], [
+        {"source": "Python-1", "reason": "The remaining values are outside the criteria."},
+    ])
+    [source] = report["sources"]
+    assert report["invalid_left_out"] == [] and report["unexplained"] == []
+    assert report["warnings"] == ["links_not_checked"]
+    assert source["posts"]["rendered"] == 1 and source["posts"]["rejected"] == 0
+    assert source["groups"]["rendered"] == 1 and source["groups"]["rejected"] == 1
+    assert [record["fill"] for record in report["items"]] == ["Ada"]
+    assert "Partial report" not in Path(report["path"]).read_text()
+
+
+def test_a_post_remainder_row_preserves_all_of_its_reported_values(report_dir):
+    report, _ = report_of(PATTERN, [post(1, group("Ada\nBob\nCy"))], [item(1, fill="Ada"), item(1, fill="Bob")], [
+        {"source": "Python-1", "reason": "The remaining value is outside the criteria."},
+    ])
+    assert report["warnings"] == ["links_not_checked"] and report["unexplained"] == []
+    assert report["counts"] == {"posts": 1, "values": 2, "evidence": 2}
+    assert [record["fill"] for record in report["items"]] == ["Ada", "Bob"]
+
+
+def test_a_post_remainder_row_does_not_explain_other_posts(report_dir):
+    report, _ = report_of(PATTERN, [post(1, group("Ada\nBob")), post(2, group("Cy"))], [item(1, fill="Ada")], [
+        {"source": "Python-1", "reason": "No other values from this post match."},
+    ])
+    assert report["invalid_left_out"] == []
+    assert report["unexplained"] == ["r/Python: Python-2", "Python-2: Cy"]
+
+
+def test_a_post_remainder_row_is_also_valid_in_a_report_without_values(report_dir):
+    report, _ = report_of(LINKS, [post(1)], [{"post": "Python-1", "description": "d", "quote": "some words"}], [
+        {"source": "Python-1", "reason": "The rest of this post is irrelevant."},
+    ])
+    assert report["warnings"] == ["links_not_checked"] and report["invalid_left_out"] == []
+    assert report["counts"]["posts"] == 1
+
+
 def test_every_group_in_a_post_has_to_be_reported_or_explained(report_dir):
     posts = [post(1, group("Ada"), group("Bob"), group("Cy"))]
     items = [item(1, fill="Ada"), item(1, fill="Bob")]
@@ -290,11 +329,10 @@ def test_a_post_id_can_still_be_a_literal_value_in_recorded_source_text(report_d
 
 
 @pytest.mark.parametrize("exclusion", [
-    {"source": "Python-1", "reason": "Exclude the post."},
     {"source": "Python-1", "value": "Ada", "reason": "Exclude the value."},
     {"source": "r/Python", "value": "Ada", "reason": "Exclude the value."},
 ])
-def test_reporting_and_explicitly_excluding_the_same_post_or_value_is_flagged_and_keeps_the_items(report_dir, exclusion):
+def test_explicitly_excluding_a_reported_value_is_flagged_and_keeps_the_items(report_dir, exclusion):
     report, reply = report_of(PATTERN, [post(1, group("Ada"))], [item(1, fill="Ada")], [exclusion])
     assert report["invalid_left_out"][0].startswith("left_out[0].source: this exclusion also appears in items")
     assert "invalid_left_out" in report["warnings"] and "this exclusion also appears in items" in reply

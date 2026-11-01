@@ -369,8 +369,9 @@ def write_report(
     Call it once, at the end, with one item per match. If a post has several values, give each one its
     own item with its own quote. If nothing matched, still call it, with an empty list: the report
     shows the user what was checked. Use left_out to say why whatever you read isn't in items: a row
-    with a source's name covers the rest of its posts, and each value you saw and aren't reporting
-    needs its own row. The report takes each post's title and comment count from the post itself,
+    with a source's name covers the rest of its posts, and a row with a post's id but no value covers
+    the rest of that post, including beside its reported items. A row naming a value excludes only
+    that value. The report takes each post's title and comment count from the post itself,
     and checks your quotes and links.
     """
     agent = tool_context.agent
@@ -550,9 +551,9 @@ def _left_out_errors(
 ) -> list[str]:
     """The left_out rows that can't stand: a post named in the wrong field, or a row that contradicts an item.
 
-    A source-wide rejection covers only the rest of that source. A post-wide rejection, or a
-    rejection of the same value, cannot also report that post/value in this call. A bad row doesn't
-    cost the report: it's saved as partial, and the model is told what to change.
+    An unqualified source or post row covers only its unreported remainder. An explicit value
+    rejection cannot also report that value in this call. A bad row doesn't cost the report:
+    it's saved as partial, and the model is told what to change.
     """
     known_ids = {post.casefold() for post in post_ids}
     errors = []
@@ -576,7 +577,7 @@ def _left_out_errors(
             same_post = row["scope"] == "post" and row["key"] == key
             same_source = row["scope"] == "source" and source_key(sources.get(key, {}).get("read_from", "")) == row["key"]
             same_value = value is not None and value.casefold() == item.get("fill", "").casefold()
-            if (same_post and not value) or ((same_post or same_source) and same_value):
+            if (same_post or same_source) and same_value:
                 errors.append(
                     f"left_out[{index}].source: this exclusion also appears in items; "
                     "remove the exclusion or name only a value that is not being reported"
