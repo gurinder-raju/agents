@@ -194,6 +194,18 @@ def test_a_clean_run_exits_zero_and_prints_the_report(run):
     assert path.is_absolute() and "Nothing matched the criteria." in path.read_text()
 
 
+def test_required_report_logs_its_skill_before_inference_and_its_source_inventory(run):
+    code, _, steps, _ = run(READ_SOURCE, EMPTY_REPORT, "Saved.", flags=["--report-required"])
+    assert code == 0
+    start = kinds(steps, "invocation_start")[0]
+    assert start["loaded_skills"][0]["name"] == "link-report"
+    assert len(start["loaded_skills"][0]["sha256"]) == 64
+    assert "For a whole-post exclusion, put the post ID in" in kinds(steps, "model_request")[0]["system_prompt"]
+    snapshot = kinds(steps, "source_snapshot")[0]
+    assert snapshot["sources"] and snapshot["reads"]
+    assert snapshot["tool_use_id"] == kinds(steps, "tool_result")[0]["tool_use_id"]
+
+
 def test_an_unreadable_source_with_a_report_exits_one_and_the_report_says_why(run):
     code, out, _, _ = run(("read_subreddit", {"subreddit": "golang"}), EMPTY_REPORT, "I couldn't read it.")
     assert code == 1

@@ -2,6 +2,8 @@ import json
 from types import SimpleNamespace
 
 from fetcher.recorder import TraceRecorder
+from fetcher import tools
+from strands.agent.state import AgentState
 
 # Stand-ins for the Strands hook events: the recorder only reads these attributes.
 TOOL_USE = {"name": "current_time", "toolUseId": "tooluse_1", "input": {"timezone": "UTC"}}
@@ -49,3 +51,26 @@ def test_records_model_errors(tmp_path):
     line = json.loads(recorder.path.read_text())
     assert line["kind"] == "model_error"
     assert "ollama not running" in line["error"]
+
+
+def test_source_snapshots_keep_groups_that_were_hidden_from_the_model(tmp_path):
+    recorder = TraceRecorder(tmp_path)
+    group = {"text": "Hidden value", "lines": ["Hidden value"], "start": 600, "end": 612, "field": "comments[0]", "shown": False}
+    sources = {"example.invalid/post": {"id": "Example-1", "text": "Visible prefix", "shown": True, "groups": [group]}}
+    agent = SimpleNamespace(state=AgentState({tools.SOURCES: sources, tools.COVERAGE: {}}))
+    recorder.on_tool_result(SimpleNamespace(
+        agent=agent, tool_use={"name": "read_subreddit", "toolUseId": "read1"}, selected_tool=object(), duration=0,
+        result={"status": "success", "content": [{"text": "shortened result"}]},
+    ))
+    result, snapshot = [json.loads(line) for line in recorder.path.read_text().splitlines()]
+    assert snapshot["kind"] == "source_snapshot" and snapshot["tool_use_id"] == "read1"
+    assert snapshot["sources"] == sources
+
+
+def test_invocation_records_the_loaded_report_skill_version(tmp_path):
+    recorder = TraceRecorder(tmp_path)
+    loaded = [{"name": "link-report", "sha256": "test-version"}]
+    recorder.on_invocation_start(SimpleNamespace(
+        messages=[], invocation_state={"report_required": True}, agent=SimpleNamespace(loaded_skill_instructions=loaded),
+    ))
+    assert json.loads(recorder.path.read_text())["loaded_skills"] == loaded

@@ -14,7 +14,8 @@ allowed-tools: read_subreddit
 2. You get a list of posts. Each has `id` (a short name such as `Python-3`), `title`, `author`, `published`, `link`, `url` (the page a link
    post points to), `text` (the post body), `comment_count` and `comments`, a flat list of
    `{author, text}`, oldest first. A reply isn't nested under the comment it answers.
-   If `posts` is empty, say there were no posts in the last 24 hours and stop.
+   If `posts` is empty, record that this source had no posts in the requested window and continue
+   with any other requested sources. For a report job, still finish with the saved report.
 3. Go through every post, one at a time, and apply what the user asked you to look for to its title,
    body and comments. Look at the comments, not just the titles.
 4. Unless the user asks for another format, report each post as:

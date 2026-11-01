@@ -380,6 +380,8 @@ def match_sources(records: list[dict[str, Any]], sources: dict[str, dict[str, An
         for evidence in record["evidence"]:
             if evidence["quote"] and not contains_words(source["text"], evidence["quote"]):
                 evidence["quote_not_found"] = True
+                if record["fill"] is not None and evidence["quote"] in {link["url"] for link in record["links"][1:]}:
+                    evidence["generated_link_quote"] = True
                 not_found.append(evidence["quote"])
     return not_found
 

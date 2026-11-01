@@ -50,11 +50,18 @@ same post and value keep all their quotes, and only an exact repeat is dropped.
 
 `left_out` says why whatever the model read isn't in `items`: a row with a source's name covers the rest of
 its posts, a row with a post's id covers that post, and a row with `value` as well covers that value.
+For a whole-post exclusion put its ID in `source`, not `value`. Inverted references and explicit
+inclusion/exclusion conflicts are returned as validation errors before any file is written.
+If a marked group has several decoded lines, each line needs an item or an explicit exclusion;
+literal slashes are preserved. Quotes that repeat generated search links and values found only in a
+different recorded post remain partial-report warnings, with diagnostics identifying the issue.
 
 ### Job outcomes
 
-For a job that has to produce a report, pass `--report-required`. Its instructions then say so. When the
-agent returns, the command line looks for this run's file, and if it isn't there, or it leaves something
+For a job that has to produce a report, pass `--report-required`. Its instructions then say so. When
+the link-report skill is available, its full instructions are loaded before the first model call and
+their content hash is recorded in the trace. When the agent returns, the command line looks for this
+run's file, and if it isn't there, or it leaves something
 the model read unexplained, asks the model once more to finish. The exit status tells a script what happened:
 
 | Exit | Outcome | Meaning |
@@ -92,3 +99,6 @@ other's budget.
 Each run writes its steps to `traces/<run_id>.jsonl`: every model call, each tool result with the tool the
 model asked for and the one that ran, `artifact_saved` (with the same records as `--report-json`) or
 `artifact_failed` after `write_report`, and a final `job_outcome`. Set `AGENT_MODEL` to try another Ollama model, and `OLLAMA_HOST` if Ollama isn't on `localhost:11434`.
+Read tools also emit `source_snapshot` records containing their remembered source text, group spans,
+visibility flags, and coverage. These local records include groups hidden from the model, so reported
+truncation counts can be audited without fetching sources again. They stay in gitignored traces.

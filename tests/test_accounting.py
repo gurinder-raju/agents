@@ -214,11 +214,74 @@ def test_every_group_in_a_post_has_to_be_reported_or_explained(report_dir):
     assert report["unexplained"] == ["Python-1: Cy"]
 
 
-def test_a_line_of_a_group_can_be_its_value(report_dir):
+def test_every_decoded_line_of_a_group_needs_a_disposition(report_dir):
     report, _ = report_of(PATTERN, [post(1, group("Ada\n1234"))], [item(1, fill="Ada")])
     [row] = report["sources"]
-    assert row["groups"]["rendered"] == 1 and report["unexplained"] == []
+    assert row["groups"]["unaccounted"] == 1 and report["unexplained"] == ["Python-1: 1234"]
     assert report["items"][0]["groups"][0]["lines"] == ["Ada", "1234"]
+
+
+def test_remaining_decoded_lines_can_be_reported_or_explicitly_rejected(report_dir):
+    posts = [post(1, group("Ada\n1234"))]
+    for items, left_out in [
+        ([item(1, fill="Ada"), item(1, fill="1234")], []),
+        ([item(1, fill="Ada")], [{"source": "Python-1", "value": "1234", "reason": "Not a target value."}]),
+    ]:
+        report, _ = report_of(PATTERN, posts, items, left_out)
+        assert report["sources"][0]["groups"]["rendered"] == 1
+        assert report["unexplained"] == []
+
+
+def test_post_ids_in_the_excluded_value_field_are_actionable_validation_errors(report_dir):
+    context = context_for(PATTERN, [post(1), post(2)])
+    with pytest.raises(ReportError) as caught:
+        write_report(title="t", criteria="c", items=[], left_out=[
+            {"source": "r/Python", "value": "Python-1", "reason": "No match."},
+            {"source": "r/Python", "value": "Python-2", "reason": "No match."},
+        ], tool_context=context)
+    assert len(caught.value.errors) == 2
+    assert all(f"left_out[{i}].value:" in error and "put the post id in source" in error for i, error in enumerate(caught.value.errors))
+    assert list(report_dir.iterdir()) == []
+
+
+def test_a_post_id_can_still_be_a_literal_value_in_recorded_source_text(report_dir):
+    report, _ = report_of(PATTERN, [post(1, group("Python-2")), post(2)], left_out=[
+        {"source": "r/Python", "value": "Python-2", "reason": "A literal identifier, not a target."},
+        {"source": "r/Python", "reason": "No other matches."},
+    ])
+    assert report["unexplained"] == []
+
+
+@pytest.mark.parametrize("exclusion", [
+    {"source": "Python-1", "reason": "Exclude the post."},
+    {"source": "Python-1", "value": "Ada", "reason": "Exclude the value."},
+    {"source": "r/Python", "value": "Ada", "reason": "Exclude the value."},
+])
+def test_reporting_and_explicitly_excluding_the_same_post_or_value_is_rejected(report_dir, exclusion):
+    context = context_for(PATTERN, [post(1, group("Ada"))])
+    with pytest.raises(ReportError, match=r"left_out\[0\].source: this exclusion also appears in items"):
+        write_report(title="t", criteria="c", items=[item(1, fill="Ada")], left_out=[exclusion], tool_context=context)
+
+
+def test_wrong_post_values_point_to_recorded_alternatives_without_reassigning_them(report_dir):
+    report, reply = report_of(PATTERN, [post(1), post(2, group("Ada"))], [item(1, fill="Ada")])
+    assert report["items"][0]["post"] == "Python-1"
+    assert report["items"][0]["possible_sources"] == ["Python-2"]
+    assert "wrong_post" in report["warnings"] and "Python-1: check Python-2" in reply
+
+
+def test_generated_search_urls_in_quotes_are_identified_as_output_not_evidence(report_dir):
+    url = "https://example.org/search?q=Ada"
+    report, reply = report_of(PATTERN, [post(1, group("Ada"))], [item(1, fill="Ada", quote=url)])
+    assert report["items"][0]["evidence"][0]["generated_link_quote"]
+    assert "generated_link_quote" in report["warnings"] and "copy source text instead" in reply
+
+
+def test_a_quote_url_that_really_occurs_in_its_source_is_valid(report_dir):
+    url = "https://example.org/search?q=Ada"
+    report, _ = report_of(PATTERN, [post(1, group("Ada"), group(url))], [item(1, fill="Ada", quote=url)])
+    assert not report["items"][0]["evidence"][0].get("generated_link_quote")
+    assert "quote_not_found" not in report["warnings"]
 
 
 def test_an_empty_fill_is_no_answer_for_a_value_that_is_there(report_dir):

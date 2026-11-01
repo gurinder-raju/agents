@@ -1,3 +1,5 @@
+import hashlib
+
 from strands.vended_plugins.skills import Skill
 
 from fetcher import agent as agent_module
@@ -23,6 +25,16 @@ def test_a_job_that_needs_a_report_is_told_so(tmp_path):
     assert agent_module.REPORT_REQUIRED not in build_agent(TraceRecorder(tmp_path)).system_prompt
     assert agent_module.REPORT_REQUIRED in build_agent(TraceRecorder(tmp_path), report_required=True).system_prompt
     assert "write_report" in agent_module.REPORT_REQUIRED  # the registered tool, not the link-report skill
+
+
+def test_report_jobs_have_the_full_report_skill_before_the_first_model_request(tmp_path):
+    skill = Skill.from_file("skills/link-report", strict=True)
+    agent = build_agent(TraceRecorder(tmp_path), report_required=True)
+    assert skill.instructions in agent.system_prompt
+    assert agent.loaded_skill_instructions == [{
+        "name": "link-report", "sha256": hashlib.sha256(skill.instructions.encode("utf-8")).hexdigest(),
+    }]
+    assert build_agent(TraceRecorder(tmp_path)).loaded_skill_instructions == []
 
 
 def test_reddit_skill_parses(tmp_path):
