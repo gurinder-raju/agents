@@ -12,7 +12,7 @@ from test_subreddit import COMMENTS, COMMENTS_URL, LISTING_URL
 
 from fetcher import agent as agent_module
 from fetcher import cli, tools
-from fetcher.outcome import FINISH_ACCOUNTING, FINISH_REPORT, finalization_request, job_outcome, report_finished
+from fetcher.outcome import FINISH_ACCOUNTING, FINISH_LEFT_OUT, FINISH_REPORT, finalization_request, job_outcome, report_finished
 from fetcher.tools import saved_report
 
 READ = {"source": "r/Python", "status": "complete", "line": "r/Python: 2 posts."}
@@ -63,7 +63,7 @@ def test_warnings_about_how_a_report_was_made_do_not_make_it_partial(report):
 @pytest.mark.parametrize("warning", [
     "unknown_post", "no_sources_read", "quote_not_found", "value_not_found", "link_not_from_tools", "link_missing",
     "link_unreachable", "unaccounted_candidates", "unaccounted_values", "source_not_read", "unknown_left_out",
-    "a_warning_added_later",
+    "invalid_left_out", "a_warning_added_later",
 ])
 def test_anything_else_makes_a_saved_report_partial(report, warning):
     outcome = job_outcome(state(report(warning), reads=[READ]), RUN, report_required=True)
@@ -138,6 +138,14 @@ def test_says_what_is_unexplained_when_asking_to_finish(report):
     assert finalization_request(state(saved)) == f"{FINISH_ACCOUNTING}\n- r/Python: Python-2\n- Python-3: Ada"
 
 
+def test_a_report_with_a_row_that_cannot_stand_is_not_finished_and_says_which(report):
+    saved = report("invalid_left_out") | {"invalid_left_out": ["left_out[0].source: bad"]}
+    assert not report_finished(state(saved), RUN)
+    assert finalization_request(state(saved)) == f"{FINISH_LEFT_OUT}\n- left_out[0].source: bad"
+    both = finalization_request(state(saved | {"unexplained": ["r/Python: Python-2"]}))
+    assert both == f"{FINISH_LEFT_OUT}\n- left_out[0].source: bad\n{FINISH_ACCOUNTING}\n- r/Python: Python-2"
+
+
 def test_a_failed_retry_is_not_told_that_no_report_was_saved(report):
     saved = report() | {"unexplained": ["r/Python: Python-2"]}
     request = finalization_request(state(saved, failure={"stage": "validation", "errors": ["items: expected a list"]}))
@@ -192,6 +200,18 @@ def test_a_clean_run_exits_zero_and_prints_the_report(run):
     report_line = next(line for line in out.splitlines() if line.startswith("report: "))
     path = Path(report_line.removeprefix("report: "))
     assert path.is_absolute() and "Nothing matched the criteria." in path.read_text()
+
+
+def test_required_report_logs_its_skill_before_inference_and_its_source_inventory(run):
+    code, _, steps, _ = run(READ_SOURCE, EMPTY_REPORT, "Saved.", flags=["--report-required"])
+    assert code == 0
+    start = kinds(steps, "invocation_start")[0]
+    assert start["loaded_skills"][0]["name"] == "link-report"
+    assert len(start["loaded_skills"][0]["sha256"]) == 64
+    assert "For a whole-post exclusion, put the post ID in" in kinds(steps, "model_request")[0]["system_prompt"]
+    snapshot = kinds(steps, "source_snapshot")[0]
+    assert snapshot["sources"] and snapshot["reads"]
+    assert snapshot["tool_use_id"] == kinds(steps, "tool_result")[0]["tool_use_id"]
 
 
 def test_an_unreadable_source_with_a_report_exits_one_and_the_report_says_why(run):
@@ -327,6 +347,46 @@ def test_a_model_that_repeats_itself_is_told_to_stop_and_saved_once(run):
     _, first, second = kinds(steps, "tool_result")
     assert "call write_report again" in first["content"][0]["text"]
     assert second["content"][0]["text"] == tools.SAME_REPORT and second["status"] == "success"
+
+
+AN_ITEM = {"post": "learnpython-1", "description": "It's about uv."}
+GOOD_REPORT = ("write_report", {"title": "uv posts", "criteria": "c", "items": [AN_ITEM]})
+BAD_ROW = ("write_report", {
+    "title": "uv posts", "criteria": "c", "items": [AN_ITEM], "left_out": [{"source": "learnpython-1", "reason": "It isn't."}],
+})
+
+
+def test_a_bad_row_sent_again_and_again_keeps_the_report_and_stops(run):
+    code, out, steps, model = run(READ_SOURCE, BAD_ROW, BAD_ROW, BAD_ROW, "I can't fix it.", "Still can't.", flags=["--report-required"])
+    assert code == 3
+    assert "outcome: partial (invalid_left_out)" in out and "report: " in out
+    assert len(kinds(steps, "artifact_saved")) == 1 and not kinds(steps, "artifact_failed")
+    assert [step["content"][0]["text"] for step in kinds(steps, "tool_result")[2:]] == [tools.SAME_REPORT, tools.SAME_REPORT]
+    assert user_turns(model)[-1].startswith(FINISH_LEFT_OUT)
+
+
+def test_a_model_that_stops_after_a_bad_row_still_leaves_its_items_in_a_report(run):
+    code, out, steps, _ = run(READ_SOURCE, BAD_ROW, "Done.")
+    assert code == 3
+    assert "outcome: partial (invalid_left_out)" in out
+    [saved] = kinds(steps, "artifact_saved")
+    assert saved["counts"]["posts"] == 1 and Path(saved["path"]).is_file()
+
+
+def test_a_bad_row_that_gets_fixed_replaces_the_partial_report(run):
+    code, out, steps, _ = run(READ_SOURCE, BAD_ROW, GOOD_REPORT, "Saved.", flags=["--report-required"])
+    assert code == 0
+    assert "outcome: complete\n" in out
+    first, second = kinds(steps, "artifact_saved")
+    assert first["warnings"] == ["invalid_left_out", "links_not_checked"] and first["path"] == second["path"]
+    assert second["warnings"] == ["links_not_checked"] and second["invalid_left_out"] == []
+
+
+def test_a_bad_row_after_a_clean_report_replaces_it_and_the_job_is_partial(run):
+    code, out, steps, _ = run(READ_SOURCE, EMPTY_REPORT, BAD_ROW, "Done.")
+    assert code == 3
+    assert "outcome: partial (invalid_left_out)" in out
+    assert kinds(steps, "artifact_saved")[-1]["counts"]["posts"] == 1
 
 
 def test_asks_only_once_then_ends_partial_with_the_report_still_there(run):

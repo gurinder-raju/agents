@@ -380,6 +380,8 @@ def match_sources(records: list[dict[str, Any]], sources: dict[str, dict[str, An
         for evidence in record["evidence"]:
             if evidence["quote"] and not contains_words(source["text"], evidence["quote"]):
                 evidence["quote_not_found"] = True
+                if record["fill"] is not None and evidence["quote"] in {link["url"] for link in record["links"][1:]}:
+                    evidence["generated_link_quote"] = True
                 not_found.append(evidence["quote"])
     return not_found
 
@@ -404,6 +406,22 @@ def count_records(records: list[dict[str, Any]]) -> dict[str, int]:
 def contains_words(text: str, phrase: str) -> bool:
     """Whether `phrase` appears in `text` as whole words, whatever the case, punctuation and spacing."""
     return f" {_words(phrase)} " in f" {_words(text)} "
+
+
+def lines_holding(lines: list[str], phrase: str) -> set[int]:
+    """The positions of the lines that hold `phrase`, or that it runs through if it crosses a line break.
+
+    A value can't hold a line break, so the model writes one that crosses a break on one line. It
+    matches as contains_words does.
+    """
+    found = {number for number, line in enumerate(lines) if contains_words(line, phrase)}
+    words = [(word, number) for number, line in enumerate(lines) for word in _words(line).split()]
+    wanted = _words(phrase).split()
+    for start in range(len(words) - len(wanted) + 1):
+        stretch = words[start:start + len(wanted)]
+        if wanted and [word for word, _ in stretch] == wanted:
+            found |= {number for _, number in stretch}
+    return found
 
 
 def canonical_link(url: str) -> str:

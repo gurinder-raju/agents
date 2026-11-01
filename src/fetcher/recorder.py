@@ -24,7 +24,7 @@ from strands.hooks import (
     HookRegistry,
 )
 
-from .tools import REPORT, REPORT_FAILURE
+from .tools import COVERAGE, REPORT, REPORT_FAILURE, SOURCES
 
 
 class TraceRecorder(HookProvider):
@@ -45,7 +45,10 @@ class TraceRecorder(HookProvider):
         registry.add_callback(AfterInvocationEvent, self.on_invocation_end)
 
     def on_invocation_start(self, event: BeforeInvocationEvent) -> None:
-        self._write("invocation_start", input=event.messages, report_required=event.invocation_state.get("report_required", False))
+        self._write(
+            "invocation_start", input=event.messages, report_required=event.invocation_state.get("report_required", False),
+            loaded_skills=getattr(event.agent, "loaded_skill_instructions", []),
+        )
 
     def on_model_request(self, event: BeforeModelCallEvent) -> None:
         # The model keeps no memory between calls: the harness sends the whole conversation every time.
@@ -97,6 +100,13 @@ class TraceRecorder(HookProvider):
         )
         if tool == "write_report":
             self._record_report(event)
+        elif tool in {"read_subreddit", "read_feed", "fetch_url"}:
+            # The tool result may be shortened. Keep the locally remembered inventory too, including
+            # groups omitted from the model input by size limits, so the counts can be checked.
+            self._write(
+                "source_snapshot", tool_use_id=event.tool_use["toolUseId"],
+                sources=event.agent.state.get(SOURCES) or {}, reads=event.agent.state.get(COVERAGE) or {},
+            )
 
     def _record_report(self, event: AfterToolCallEvent) -> None:
         state = event.agent.state

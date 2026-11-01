@@ -376,7 +376,10 @@ def write_report(
     agent = tool_context.agent
     # A small model that can't fix what a reply flags sends the same call again and again, at half a
     # minute a time. What it read counts too: a source read since can change the report.
-    call = json.dumps([title, criteria, items, sort, left_out, agent.state.get(COVERAGE)], sort_keys=True, default=str)
+    call = json.dumps(
+        [title, criteria, items, sort, left_out, agent.state.get(COVERAGE), agent.state.get(SOURCES), agent.state.get(POST_IDS)],
+        sort_keys=True, default=str,
+    )
     earlier = agent.state.get(REPORT)
     if earlier and call == agent.state.get(REPORT_CALL) and Path(earlier["path"]).is_file():
         agent.state.delete(REPORT_FAILURE)  # it's gone back to the report that stands
@@ -407,6 +410,11 @@ def _save_report(
     rows, adapted, left_out = parse_report(title, criteria, items, sort, item_contract(prompt), unknown, left_out)
 
     kept, unknown_posts, without_value = _resolve_items(rows, templates, post_ids, sources)
+    requested = requested_sources(prompt)
+    reads = list((agent.state.get(COVERAGE) or {}).values())
+    names = {source_key(name) for name in [*requested, *(read["source"] for read in reads)]}
+    left_out = _place_left_out(left_out, names, post_ids, sources)
+    invalid_rows = _left_out_errors(left_out, kept, post_ids, sources)
     records, repeats = combine_values(normalize_items(kept))
     unmatched_quotes = match_sources(records, sources)
     made_up_values = _check_filled_values(records, sources)
@@ -418,13 +426,11 @@ def _save_report(
     if sort == "comments":
         records.sort(key=lambda record: record.get("comment_count", -1), reverse=True)
 
-    reads = list((agent.state.get(COVERAGE) or {}).values())
-    requested = requested_sources(prompt)
-    names = {source_key(name) for name in [*requested, *(read["source"] for read in reads)]}
-    left_out = _place_left_out(left_out, names, post_ids, sources) + [_no_value_row(row, sources) for row in without_value]
+    left_out += [_no_value_row(row, sources) for row in without_value]
     ledger = account_sources(requested, reads, sources, records, left_out, bool(templates))
 
-    problems = _problems(records, unknown_posts, made_up_values, unmatched_quotes, unsourced) | _accounting_problems(ledger, left_out)
+    problems = _problems(records, unknown_posts, made_up_values, unmatched_quotes, unsourced)
+    problems |= _accounting_problems(ledger, left_out, invalid_rows)
     gaps = [read["line"] for read in reads if read["status"] != "complete"]
     other_warnings = {
         "no_value": without_value,
@@ -462,6 +468,7 @@ def _save_report(
         "warnings": warnings,
         "skipped": {"unknown_post": len(unknown_posts), "no_value": len(without_value), "duplicate": repeats},
         "unexplained": _unexplained(ledger),
+        "invalid_left_out": invalid_rows,
         "sources": ledger,
         "left_out": left_out,
         "items": records,
@@ -538,6 +545,47 @@ def _post_row(link: str, sources: dict[str, Any]) -> dict[str, Any]:
     return {"scope": "post", "key": key, "link": link, "title": sources.get(key, {}).get("title")}
 
 
+def _left_out_errors(
+    rows: list[dict[str, Any]], items: list[dict[str, str]], post_ids: dict[str, str], sources: dict[str, Any]
+) -> list[str]:
+    """The left_out rows that can't stand: a post named in the wrong field, or a row that contradicts an item.
+
+    A source-wide rejection covers only the rest of that source. A post-wide rejection, or a
+    rejection of the same value, cannot also report that post/value in this call. A bad row doesn't
+    cost the report: it's saved as partial, and the model is told what to change.
+    """
+    known_ids = {post.casefold() for post in post_ids}
+    errors = []
+    for index, row in enumerate(rows):
+        value = row.get("value")
+        if row["scope"] == "source" and value and value.casefold() in known_ids:
+            # An ID can also be literal source text. Preserve that legitimate value case.
+            literal = any(
+                source_key(facts.get("read_from", "")) == row["key"] and contains_words(facts.get("text", ""), value)
+                for facts in sources.values()
+            )
+            if not literal:
+                errors.append(
+                    f"left_out[{index}].value: {value!r} is a post id, not a value; put the post id in "
+                    "source and omit value to exclude the whole post"
+                )
+        if row["scope"] is None:
+            continue  # unknown references remain explicit partial-report warnings
+        for item in items:
+            key = canonical_link(item["link"])
+            same_post = row["scope"] == "post" and row["key"] == key
+            same_source = row["scope"] == "source" and source_key(sources.get(key, {}).get("read_from", "")) == row["key"]
+            same_value = value is not None and value.casefold() == item.get("fill", "").casefold()
+            if (same_post and not value) or ((same_post or same_source) and same_value):
+                errors.append(
+                    f"left_out[{index}].source: this exclusion also appears in items; "
+                    "remove the exclusion or name only a value that is not being reported"
+                )
+                break
+    more = len(errors) - MAX_NAMES
+    return errors[:MAX_NAMES] + ([f"and {more} more rows like these"] if more > 0 else [])
+
+
 def _no_value_row(item: dict[str, str], sources: dict[str, Any]) -> dict[str, Any]:
     """An item with an empty fill is the model saying what became of that post, like a left_out row."""
     return {"source": item["post"], "reason": item["description"], "no_value": True} | _post_row(item["link"], sources)
@@ -550,10 +598,20 @@ def _problems(
     links = list({link["url"]: link for record in records for link in record["links"]}.values())
     missing = [_with_closest(link) for link in links if link["check"] == "missing"]
     unreachable = [link["url"] for link in links if link["check"] == "unreachable"]
+    misplaced = [f"{record['post']}: check {', '.join(record['possible_sources'])}" for record in records if record.get("possible_sources")]
+    generated = [record["post"] for record in records if any(e.get("generated_link_quote") for e in record["evidence"])]
     checks = {
         "unknown_post": (unknown_posts, f"these post ids aren't from read_subreddit, so those items were left out: {', '.join(unknown_posts)}"),
         "value_not_found": (made_up_values, f"these values aren't in their post or its comments: {' | '.join(made_up_values)}"),
         "quote_not_found": (unmatched_quotes, f"these quotes aren't in their post or its comments: {' | '.join(unmatched_quotes)}"),
+        "wrong_post": (
+            misplaced,
+            f"these values were not found in their assigned post but occur in other recorded sources: {'; '.join(misplaced)}",
+        ),
+        "generated_link_quote": (
+            generated,
+            f"these posts use generated output links as quotes; copy source text instead: {', '.join(dict.fromkeys(generated))}",
+        ),
         "link_not_from_tools": (unsourced, f"no tool returned these links and they don't fill in a pattern the user gave: {', '.join(unsourced)}"),
         "link_missing": (missing, f"these links don't exist: {', '.join(missing)}"),
         "link_unreachable": (unreachable, f"these links' hosts didn't answer, so they may or may not work: {', '.join(unreachable)}"),
@@ -561,11 +619,12 @@ def _problems(
     return {code: sentence for code, (found, sentence) in checks.items() if found}
 
 
-def _accounting_problems(ledger: list[dict[str, Any]], left_out: list[dict[str, Any]]) -> dict[str, str]:
+def _accounting_problems(ledger: list[dict[str, Any]], left_out: list[dict[str, Any]], invalid_rows: list[str]) -> dict[str, str]:
     """What the report doesn't explain, as warning codes and sentences. Input that was cut off isn't here: its read says so."""
     posts, groups, not_read = _unaccounted(ledger)
     strays = [row["source"] for row in left_out if row["scope"] is None]
     checks = {
+        "invalid_left_out": (invalid_rows, f"these left_out rows have to change: {' | '.join(invalid_rows)}"),
         "unaccounted_candidates": (posts, f"no item or left_out row covers these posts: {'; '.join(posts)}"),
         "unaccounted_values": (groups, f"no item or left_out row covers these values: {'; '.join(groups)}"),
         "source_not_read": (not_read, f"these sources were asked for but not read, and no left_out row says why: {', '.join(not_read)}"),
@@ -704,6 +763,12 @@ def _check_filled_values(records: list[dict[str, Any]], sources: dict[str, Any])
         source = sources.get(canonical_link(record["links"][0]["url"]))
         if source is not None and record["fill"] and not contains_words(source["text"], record["fill"]):
             record["value_not_found"] = True
+            elsewhere = [
+                facts.get("id") or link for link, facts in sources.items()
+                if link != canonical_link(record["links"][0]["url"]) and contains_words(facts.get("text", ""), record["fill"])
+            ]
+            if elsewhere:
+                record["possible_sources"] = elsewhere
             made_up.append(record["fill"])
     return made_up
 

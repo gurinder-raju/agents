@@ -21,7 +21,7 @@ can't wave through something nobody looked at.
 from collections import Counter, defaultdict
 from typing import Any
 
-from .report import canonical_link, contains_words, count_records
+from .report import canonical_link, count_records, lines_holding
 
 
 def source_key(name: str) -> str:
@@ -71,13 +71,20 @@ def _account_source(
 
     posts: dict[str, str] = {}
     groups: list[tuple[str, dict[str, Any], str]] = []
+    unaccounted_groups = []
     submitted = 0
     for link, facts in found.items():
         post_rows = [row for row in left_out if row["scope"] == "post" and row["key"] == link]
         posts[link] = _post_verdict(facts, reported.get(link, []), post_rows, whole_source is not None)
         submitted += bool(reported.get(link)) or any(row.get("no_value") for row in post_rows)
         for group in facts.get("groups", ()) if values_matter else ():
-            groups.append((link, group, _group_verdict(group, reported.get(link, []), post_rows + source_rows)))
+            records = reported.get(link, [])
+            reasons = post_rows + source_rows
+            verdict = _group_verdict(group, records, reasons)
+            groups.append((link, group, verdict))
+            if verdict == "unaccounted":
+                missing = [text for text, part in _group_parts(group, records, reasons) if part == "unaccounted"]
+                unaccounted_groups.append(f"{_short_name(link, facts)}: {' | '.join(missing)}")
 
     name = read["source"] if read else asked
     reason = whole_source["reason"] if whole_source else None
@@ -94,11 +101,7 @@ def _account_source(
         "report": count_records([record for link in found for record in reported.get(link, [])]),
         "unaccounted": {
             "posts": [_short_name(link, found[link]) for link, verdict in posts.items() if verdict == "unaccounted"],
-            "groups": [
-                f"{_short_name(link, found[link])}: {' | '.join(group['lines'])}"
-                for link, group, verdict in groups
-                if verdict == "unaccounted"
-            ],
+            "groups": unaccounted_groups,
         },
     }
 
@@ -114,22 +117,40 @@ def _post_verdict(facts: dict[str, Any], records: list[dict[str, Any]], post_row
 
 
 def _group_verdict(group: dict[str, Any], records: list[dict[str, Any]], rows: list[dict[str, Any]]) -> str:
-    """A record with no fill reports its post in a job with no values, and with it everything in the post."""
-    if any(record["fill"] is None or group in record.get("groups", ()) for record in records):
-        return "rendered"
-    if any(_explains(row, group) for row in rows):
-        return "rejected"
-    return "unaccounted" if group["shown"] else "truncated"
+    """A group is accounted for only when every line has a disposition."""
+    verdicts = {verdict for _, verdict in _group_parts(group, records, rows)}
+    return next(verdict for verdict in ("unaccounted", "truncated", "rendered", "rejected") if verdict in verdicts)
 
 
-def _explains(row: dict[str, Any], group: dict[str, Any]) -> bool:
-    """A row with a value explains that value, and a post's row with none explains all of that post.
+def _group_parts(group: dict[str, Any], records: list[dict[str, Any]], rows: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    """Use the supplied lines; literal slashes and prose are never split into guessed values.
+
+    A value settles every line it touches, so one that runs over a line break settles each line it's on.
+    """
+    parts = list(dict.fromkeys(line for line in group["lines"] if line.strip())) or [group["text"]]
+    result = []
+    for number, text in enumerate(parts):
+        if any(
+            record["fill"] is None or (group in record.get("groups", ()) and number in lines_holding(parts, record["fill"]))
+            for record in records
+        ):
+            verdict = "rendered"
+        elif any(_explains(row, parts, number) for row in rows):
+            verdict = "rejected"
+        else:
+            verdict = "unaccounted" if group["shown"] else "truncated"
+        result.append((text, verdict))
+    return result
+
+
+def _explains(row: dict[str, Any], parts: list[str], number: int) -> bool:
+    """A row with a value explains the lines that value is on, and a post's row with none explains all of that post.
 
     An empty fill doesn't: it says the post has no value, which is no answer for a value that's there.
     """
     if row.get("no_value"):
         return False
-    return contains_words(group["text"], row["value"]) if row.get("value") else row["scope"] == "post"
+    return number in lines_holding(parts, row["value"]) if row.get("value") else row["scope"] == "post"
 
 
 def _short_name(link: str, facts: dict[str, Any]) -> str:

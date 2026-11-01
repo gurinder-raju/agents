@@ -1,5 +1,6 @@
 """The agent: which model it calls, which tools it has, and how it is told to behave."""
 
+import hashlib
 import importlib.util
 import os
 import sys
@@ -71,6 +72,18 @@ def build_agent(recorder: TraceRecorder, prompt: str = "", report_required: bool
     # The read tools run these on every post, comment and feed entry before the model reads them.
     agent.text_transforms = text_transforms
     agent.group_finders = group_finders
+    agent.loaded_skill_instructions = []
+    if report_required:
+        report_skill = next((skill for skill in skills.get_available_skills(agent) if skill.name == "link-report"), None)
+        if report_skill is not None:
+            agent.system_prompt += (
+                "\n\nThe link-report skill is already loaded below; follow its instructions.\n"
+                f"<loaded_skill name=\"link-report\">\n{report_skill.instructions}\n</loaded_skill>"
+            )
+            agent.loaded_skill_instructions.append({
+                "name": report_skill.name,
+                "sha256": hashlib.sha256(report_skill.instructions.encode("utf-8")).hexdigest(),
+            })
     return agent
 
 

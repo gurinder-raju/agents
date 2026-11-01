@@ -9,8 +9,8 @@ The policy for partial reports:
 - A valid call is always saved, whatever else is wrong, because some of the answer beats none of it.
   The report says at the top what makes it partial, and write_report tells the model.
 - It's partial if a source failed or was cut short, if no source was read, if an item couldn't be
-  placed, if something in it couldn't be confirmed, or if anything the model read has no explanation:
-  see NOTES for the only warnings that don't count.
+  placed, if something in it couldn't be confirmed, if a left_out row can't stand, or if anything the
+  model read has no explanation: see NOTES for the only warnings that don't count.
 - Leaving something out is fine if it's explained. Everything found has to end up on the page or with
   a reason, as accounting.py sets out, and a requested source that wasn't read needs a reason too.
 - An empty report is a complete answer only if every source was read in full and everything in them
@@ -18,8 +18,9 @@ The policy for partial reports:
 
 A job that needs a report says so with --report-required. Its instructions then ask for one. When the
 agent returns, the command line looks for this run's file, and if it isn't there, or it leaves
-something unexplained, asks the model once more to finish. If the file's still not there, the job's
-outcome is report_not_created. If it's there but still doesn't explain everything, the job is partial.
+something unexplained or a left_out row that can't stand, asks the model once more to finish. If the
+file's still not there, the job's outcome is report_not_created. If it's there but still doesn't
+explain everything, the job is partial.
 """
 
 from typing import Any
@@ -36,6 +37,10 @@ FINISH_ACCOUNTING = (
     "with a source's name covers all the rest of its posts, and a value needs a row of its own. These have no item "
     "or left_out row:"
 )
+FINISH_LEFT_OUT = (
+    "The job isn't finished: some left_out rows in the report can't stand. Call write_report again with the same "
+    "title, every item and the other left_out rows you sent before, and change these:"
+)
 
 # 2 is taken: argparse exits with it when it can't read the command line.
 EXIT_CODES = {"complete": 0, "failed": 1, "partial": 3, "report_not_created": 4}
@@ -49,15 +54,16 @@ _READ_WARNINGS = {"source_failed", "source_incomplete"}
 
 
 def report_finished(state: Any, run_id: str) -> bool:
-    """Whether this run saved its report, and that report explains everything left out of it."""
+    """Whether this run saved its report, and that report explains everything left out of it with rows that can stand."""
     report = saved_report(state, run_id)
-    return report is not None and not report.get("unexplained")
+    return report is not None and not report.get("unexplained") and not report.get("invalid_left_out")
 
 
 def finalization_request(state: Any) -> str:
     """What to tell a model that hasn't finished the report, including why its last call didn't."""
-    unexplained = (state.get(REPORT) or {}).get("unexplained")
-    request = "\n- ".join([FINISH_ACCOUNTING, *unexplained]) if unexplained else FINISH_REPORT
+    report = state.get(REPORT) or {}
+    asks = ((FINISH_LEFT_OUT, report.get("invalid_left_out")), (FINISH_ACCOUNTING, report.get("unexplained")))
+    request = "\n".join("\n- ".join([ask, *lines]) for ask, lines in asks if lines) or FINISH_REPORT
     failure = state.get(REPORT_FAILURE)
     if failure is None:
         return request

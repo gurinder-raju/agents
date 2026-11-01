@@ -704,6 +704,18 @@ def test_a_changed_call_or_a_new_read_saves_again(report_dir):
     assert "source_failed" in context.agent.state.get(tools.REPORT)["warnings"]
 
 
+def test_changed_source_evidence_revalidates_the_same_call_even_when_coverage_is_unchanged(report_dir):
+    context = tool_context()
+    items = [{"link": POST, "description": "d", "quote": "new evidence"}]
+    write_report(title="t", criteria="c", items=items, tool_context=context)
+    assert "quote_not_found" in context.agent.state.get(tools.REPORT)["warnings"]
+    sources = context.agent.state.get(tools.SOURCES)
+    sources[canonical_link(POST)]["text"] += "\nnew evidence"
+    context.agent.state.set(tools.SOURCES, sources)
+    assert write_report(title="t", criteria="c", items=items, tool_context=context) != tools.SAME_REPORT
+    assert "quote_not_found" not in context.agent.state.get(tools.REPORT)["warnings"]
+
+
 def test_the_same_call_saves_again_if_the_file_has_gone(report_dir):
     context = tool_context(run_id="20261026-131500-a1b2c3")
     path = Path(write_report(title="t", criteria="c", items=[], tool_context=context))
@@ -758,7 +770,7 @@ def test_escapes_every_value_quote_label_and_reason(report_dir):
     context = tool_context(PATTERN)
     context.agent.state.set(tools.SOURCES, {canonical_link(POST): {"title": NASTY, "text": f"{NASTY} here"}})
     items = [{"post": POST, "fill": NASTY, "description": NASTY, "quote": NASTY}]
-    left_out = [{"source": POST, "value": NASTY, "reason": NASTY}, {"source": NASTY, "reason": NASTY}]
+    left_out = [{"source": POST, "value": NASTY + " excluded", "reason": NASTY}, {"source": NASTY, "reason": NASTY}]
     write_report(title=NASTY, criteria=NASTY, items=items, left_out=left_out, tool_context=context)
     html = Path(context.agent.state.get(tools.REPORT)["path"]).read_text()
 
