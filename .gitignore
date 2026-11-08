@@ -20,3 +20,7 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Claude Code: personal settings and notes (saved commands can hold secrets)
+**/.claude/settings.local.json
+CLAUDE.local.md
