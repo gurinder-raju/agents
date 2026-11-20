@@ -470,4 +470,108 @@ header, section { display: grid; gap: 14px; min-width: 0; }
   </div>
 </section>
 
+<section id="fetcher">
+  <h2>Fetcher on Mac and AWS</h2>
+  <div class="legend">
+    <span><i class="sw ln side"></i>Credential lookup</span>
+    <span><i class="sw ln egress"></i>Authorized source request</span>
+  </div>
+  <div class="frame">
+<svg viewBox="0 0 1160 582" role="img" aria-labelledby="f4t f4d">
+<title id="f4t">Fetcher deployment on Mac and AWS</title>
+<desc id="f4d">On the Mac, launchd or the command line runs the Fetcher agent in its Strands harness. The harness calls local Ollama, writes report and trace files, and reads approved sources through a separate tool gateway over a private Unix socket. The gateway reads its credential from macOS Keychain. In the AWS design, the harness runs on AWS compute, calls a configured Ollama endpoint, writes report and trace files to the job filesystem, and invokes the gateway on Lambda using IAM. The Lambda role reads its credential from Secrets Manager. Both gateways use the token to call an approved Devvit external endpoint.</desc>
+<defs><marker id="ah4" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+
+<text class="hd" fill="var(--ink)" x="290" y="26" text-anchor="middle">Mac</text>
+<text class="lbl" x="290" y="48" text-anchor="middle">Local stack · tested with fixtures</text>
+<text class="hd aws" x="870" y="26" text-anchor="middle">AWS</text>
+<text class="lbl" x="870" y="48" text-anchor="middle">Cloud deployment design</text>
+<line class="rule" x1="580" y1="64" x2="580" y2="457"/>
+<rect class="b n ctr" x="20" y="64" width="540" height="393" rx="12"/>
+<rect class="b aws ctr" x="600" y="64" width="540" height="393" rx="12"/>
+
+<rect class="b n" x="144" y="78" width="292" height="48" rx="8"/>
+<text class="tt" x="290" y="98" text-anchor="middle">Scheduled or manual run</text>
+<text class="ts" x="290" y="116" text-anchor="middle">launchd or command line</text>
+<line class="ar" x1="290" y1="128" x2="290" y2="148" marker-end="url(#ah4)"/>
+
+<rect class="b n oss" x="48" y="150" width="484" height="62" rx="8"/>
+<text class="tt" x="290" y="176" text-anchor="middle">Fetcher agent</text>
+<text class="ts" x="290" y="196" text-anchor="middle">Python · Strands harness</text>
+
+<line class="ar" x1="115" y1="214" x2="115" y2="260" marker-end="url(#ah4)"/>
+<line class="ar" x1="290" y1="214" x2="290" y2="260" marker-end="url(#ah4)"/>
+<text class="svc" x="301" y="240">private Unix socket</text>
+<line class="ar" x1="465" y1="214" x2="465" y2="260" marker-end="url(#ah4)"/>
+
+<rect class="b n oss" x="40" y="262" width="150" height="74" rx="8"/>
+<text class="tt" x="115" y="285" text-anchor="middle">Ollama</text>
+<text class="ts" x="115" y="305" text-anchor="middle">model inference</text>
+<text class="ts" x="115" y="321" text-anchor="middle">on the Mac</text>
+
+<rect class="b n oss" x="202" y="262" width="176" height="74" rx="8"/>
+<text class="tt" x="290" y="285" text-anchor="middle">Tool gateway</text>
+<text class="ts" x="290" y="305" text-anchor="middle">separate service process</text>
+<text class="ts" x="290" y="321" text-anchor="middle">reads approved sources</text>
+
+<rect class="b n" x="390" y="262" width="150" height="74" rx="8"/>
+<text class="tt" x="465" y="285" text-anchor="middle">Reports and trace</text>
+<text class="ts" x="465" y="305" text-anchor="middle">HTML · JSON · JSONL</text>
+<text class="ts" x="465" y="321" text-anchor="middle">Mac filesystem</text>
+
+<path class="ar side" d="M350 338 V409 H388" marker-end="url(#ah4)"/>
+<rect class="b n" x="390" y="374" width="150" height="70" rx="8"/>
+<text class="tt" x="465" y="397" text-anchor="middle">macOS Keychain</text>
+<text class="ts" x="465" y="417" text-anchor="middle">provider token</text>
+<text class="ts" x="465" y="433" text-anchor="middle">gateway account</text>
+
+<rect class="b n" x="724" y="78" width="292" height="48" rx="8"/>
+<text class="tt" x="870" y="98" text-anchor="middle">Scheduled or manual run</text>
+<text class="ts" x="870" y="116" text-anchor="middle">job runner on AWS</text>
+<line class="ar" x1="870" y1="128" x2="870" y2="148" marker-end="url(#ah4)"/>
+
+<rect class="b aws oss" x="628" y="150" width="484" height="62" rx="8"/>
+<text class="tt" x="870" y="176" text-anchor="middle">Fetcher agent</text>
+<text class="ts" x="870" y="196" text-anchor="middle">Python · Strands harness on AWS compute</text>
+
+<line class="ar" x1="695" y1="214" x2="695" y2="260" marker-end="url(#ah4)"/>
+<line class="ar" x1="870" y1="214" x2="870" y2="260" marker-end="url(#ah4)"/>
+<text class="svc" x="881" y="240">IAM · InvokeFunction</text>
+<line class="ar" x1="1045" y1="214" x2="1045" y2="260" marker-end="url(#ah4)"/>
+
+<rect class="b aws oss" x="620" y="262" width="150" height="74" rx="8"/>
+<text class="tt" x="695" y="285" text-anchor="middle">Ollama</text>
+<text class="ts" x="695" y="305" text-anchor="middle">cloud model endpoint</text>
+<text class="sdk" x="695" y="321" text-anchor="middle">OLLAMA_HOST</text>
+
+<rect class="b aws" x="782" y="262" width="176" height="74" rx="8"/>
+<text class="tt" x="870" y="285" text-anchor="middle">Tool gateway</text>
+<text class="ts" x="870" y="305" text-anchor="middle">AWS Lambda function</text>
+<text class="ts" x="870" y="321" text-anchor="middle">reads approved sources</text>
+
+<rect class="b n" x="970" y="262" width="150" height="74" rx="8"/>
+<text class="tt" x="1045" y="285" text-anchor="middle">Reports and trace</text>
+<text class="ts" x="1045" y="305" text-anchor="middle">HTML · JSON · JSONL</text>
+<text class="ts" x="1045" y="321" text-anchor="middle">job filesystem</text>
+
+<path class="ar side" d="M930 338 V409 H968" marker-end="url(#ah4)"/>
+<rect class="b aws" x="970" y="374" width="150" height="70" rx="8"/>
+<text class="tt" x="1045" y="397" text-anchor="middle">Secrets Manager</text>
+<text class="ts" x="1045" y="417" text-anchor="middle">provider token</text>
+<text class="ts" x="1045" y="433" text-anchor="middle">gateway execution role</text>
+
+<path class="ar eg" d="M290 338 V483 H438 V504" marker-end="url(#ah4)"/>
+<text class="svc" x="301" y="446">HTTPS</text>
+<path class="ar eg" d="M870 338 V483 H722 V504" marker-end="url(#ah4)"/>
+<text class="svc" x="881" y="446">HTTPS</text>
+<rect class="b n" x="348" y="506" width="464" height="60" rx="8"/>
+<text class="tt" x="580" y="530" text-anchor="middle">Approved source API</text>
+<text class="ts" x="580" y="550" text-anchor="middle">Devvit external endpoint · requires approved access and a managed token</text>
+</svg>
+  </div>
+  <ul class="notes">
+    <li>Fetcher uses the same source and report formats in both deployments. The gateway keeps provider credentials out of model input.</li>
+  </ul>
+</section>
+
 </div>
