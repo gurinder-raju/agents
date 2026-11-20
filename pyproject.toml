@@ -6,10 +6,12 @@ requires-python = ">=3.12"
 dependencies = [
     "strands-agents[ollama]>=1.62,<2",
     "httpx>=0.28,<1",
+    "boto3>=1.40,<2",
 ]
 
 [project.scripts]
 fetcher = "fetcher.cli:main"
+fetcher-gateway = "fetcher.gateway_transport:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]

@@ -16,7 +16,7 @@ from strands.vended_plugins.skills import AgentSkills
 from .recorder import TraceRecorder
 from .reply_retry import ReplyRetry
 from .skill_redirect import SkillNameRedirect
-from .tools import current_time, fetch_url, read_feed, read_subreddit, report_tool
+from .tools import current_time, fetch_url, gateway_subreddit_tool, read_feed, read_subreddit, report_tool
 
 # Generic on purpose. Instructions for a specific job belong in job files under jobs/, which git ignores.
 SYSTEM_PROMPT = """You are a helpful assistant.
@@ -40,7 +40,10 @@ SKILL_DIRS = ["skills", "jobs/skills"]
 LOCAL_TOOL_DIR = Path("jobs/tools")
 
 
-def build_agent(recorder: TraceRecorder, prompt: str = "", report_required: bool = False) -> Agent:
+def build_agent(
+    recorder: TraceRecorder, prompt: str = "", report_required: bool = False,
+    *, gateway_reader: Callable[[str, float], dict[str, Any]] | None = None,
+) -> Agent:
     """Build the agent for one run. `prompt` picks the report items its model is shown: see report_tool."""
     model = OllamaModel(
         host=os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
@@ -61,9 +64,13 @@ def build_agent(recorder: TraceRecorder, prompt: str = "", report_required: bool
     # `skills` tool the model calls to load a skill's full instructions when it needs them.
     skills = AgentSkills(skills=[d for d in SKILL_DIRS if Path(d).is_dir()])
     local_tools, text_transforms, group_finders = load_local_tools()
+    if gateway_reader is None:
+        read_tools = [fetch_url, read_feed, read_subreddit, *local_tools]
+    else:
+        read_tools = [gateway_subreddit_tool(gateway_reader)]
     agent = Agent(
         model=model,
-        tools=[current_time, fetch_url, read_feed, read_subreddit, report_tool(prompt), *local_tools],
+        tools=[current_time, *read_tools, report_tool(prompt)],
         system_prompt=SYSTEM_PROMPT + (REPORT_REQUIRED if report_required else ""),
         # Registered after the recorder, so it runs first after a model call and the trace shows its retries.
         hooks=[recorder, SkillNameRedirect(skills), ReplyRetry()],

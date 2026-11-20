@@ -3,8 +3,11 @@
 import argparse
 import sys
 import traceback
+from functools import partial
+from pathlib import Path
 
 from .agent import build_agent, unload_model
+from .gateway_transport import read_at_lambda, read_at_socket
 from .outcome import finalization_request, job_outcome, report_finished
 from .recorder import TraceRecorder
 
@@ -18,16 +21,25 @@ def main() -> int:
     )
     parser.add_argument("--no-verify-links", action="store_true", help="don't check a report's links over the network")
     parser.add_argument("--report-json", action="store_true", help="also save the report's data as JSON beside its HTML")
+    gateway = parser.add_mutually_exclusive_group()
+    gateway.add_argument("--gateway-socket", type=Path, help="read sources via this local gateway socket")
+    gateway.add_argument("--gateway-function", help="read sources via this AWS Lambda function")
     args = parser.parse_args()
 
+    gateway_reader = None
+    if args.gateway_socket:
+        gateway_reader = partial(read_at_socket, args.gateway_socket)
+    elif args.gateway_function:
+        gateway_reader = partial(read_at_lambda, args.gateway_function)
+
     recorder = TraceRecorder(args.trace_dir)
-    agent = build_agent(recorder, args.prompt, args.report_required)
+    agent = build_agent(recorder, args.prompt, args.report_required, gateway_reader=gateway_reader)
     # invocation_state reaches the hooks and tools that ask for a ToolContext, and never the model.
     # write_report names its file after the run.
     settings = {
         "run_id": recorder.run_id,
         "report_required": args.report_required,
-        "verify_links": not args.no_verify_links,
+        "verify_links": gateway_reader is None and not args.no_verify_links,
         "report_json": args.report_json,
     }
     error = None

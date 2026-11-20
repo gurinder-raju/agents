@@ -17,7 +17,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from copy import copy
 from datetime import UTC, datetime, timedelta
@@ -34,6 +34,7 @@ import httpx
 from strands import ToolContext, tool
 
 from .accounting import account_sources, accounting_lines, source_key
+from .gateway import SUBREDDIT_NAME
 from .report import (
     ARGUMENTS,
     LINK_ITEM,
@@ -153,7 +154,6 @@ MIN_COMMENTS_PER_POST = 5
 MAX_COMMENT_PAGES = 10
 # The post listing holds the newest 100 posts, which covers a day for all but the busiest subreddits.
 LISTING_POSTS = 100
-_SUBREDDIT_NAME = re.compile(r"^[A-Za-z0-9_]{2,21}$")
 _POST_ID = re.compile(r"/comments/([a-z0-9]+)/")
 # Reddit ends each post's feed entry with "submitted by /u/name [link] [comments]".
 _REDDIT_TRAILER = re.compile(r"\s*submitted by\s+/u/\S+\s*(\[link\])?\s*(\[comments\])?\s*$")
@@ -166,8 +166,8 @@ def read_subreddit(subreddit: str, since_hours: float = 24, sort: str = "new", a
     Each post has id (a short name for it, such as Python-3, to give write_report), title, author,
     published (UTC), link, url (the page a link post points to, if any), text (the post body),
     comment_count and comments: a flat list of {author, text}, oldest first.
-    Without logging in, Reddit allows about one request a minute. This reads the post list, then the
-    subreddit's comment feed 100 comments at a time, so a day of a busy subreddit takes a few minutes.
+    This uses the legacy RSS feeds, which Reddit retired in November 2026. Use gateway mode for an
+    approved API source.
     If everything doesn't fit, "omitted" counts the posts and comments that were left out.
 
     Args:
@@ -175,12 +175,7 @@ def read_subreddit(subreddit: str, since_hours: float = 24, sort: str = "new", a
         since_hours: Only include posts published within this many hours.
         sort: "new" for newest first, or "comments" for the most commented first.
     """
-    name = subreddit.removeprefix("r/").strip("/")
-    if not _SUBREDDIT_NAME.match(name):
-        raise ValueError(f"not a valid subreddit name: {subreddit!r}")
-    if sort not in ("new", "comments"):
-        raise ValueError('sort must be "new" or "comments"')
-
+    name = _subreddit_args(subreddit, sort)
     cutoff = datetime.now(UTC) - timedelta(hours=since_hours)
     with _noting_failure(agent, f"r/{name}"):
         _, listing = parse_feed(http_get(f"https://www.reddit.com/r/{name}/new/.rss?limit={LISTING_POSTS}").text)
@@ -212,6 +207,38 @@ def read_subreddit(subreddit: str, since_hours: float = 24, sort: str = "new", a
     return present_posts(name, posts, since_hours, sort, comments_complete, agent, posts_complete)
 
 
+def gateway_subreddit_tool(reader: Callable[[str, float], dict[str, Any]]):
+    """Bind the existing model tool name to the configured source gateway."""
+    @tool
+    def read_subreddit(subreddit: str, since_hours: float = 24, sort: str = "new", agent: Any = None) -> str:
+        """Read recent posts and comments from a subreddit configured for this job.
+
+        Posts have short ids for write_report, and the result records whether the read was complete.
+
+        Args:
+            subreddit: Subreddit name, for example "Python".
+            since_hours: Only include posts published within this many hours.
+            sort: "new" for newest first, or "comments" for the most commented first.
+        """
+        name = _subreddit_args(subreddit, sort)
+        with _noting_failure(agent, f"r/{name}"):
+            source = reader(name, since_hours)
+            return present_posts(
+                name, source["posts"], since_hours, sort, source["comments_complete"], agent,
+                source["posts_complete"], via_gateway=True,
+            )
+    return read_subreddit
+
+
+def _subreddit_args(subreddit: str, sort: str) -> str:
+    name = subreddit.removeprefix("r/").strip("/")
+    if not SUBREDDIT_NAME.fullmatch(name):
+        raise ValueError(f"not a valid subreddit name: {subreddit!r}")
+    if sort not in ("new", "comments"):
+        raise ValueError('sort must be "new" or "comments"')
+    return name
+
+
 def present_posts(
     name: str,
     posts: list[dict[str, Any]],
@@ -220,6 +247,8 @@ def present_posts(
     comments_complete: bool,
     agent: Any,
     posts_complete: bool = True,
+    *,
+    via_gateway: bool = False,
 ) -> str:
     """Turn a subreddit's posts into what the model reads: rewritten by any local text transforms,
     numbered, remembered for write_report, and cut to fit the model's context window."""
@@ -266,9 +295,15 @@ def present_posts(
     if omitted["posts"] or omitted["comments"]:
         coverage += f" {omitted['posts']} posts and {omitted['comments']} comments didn't fit in what the model could read."
     if not comments_complete:
-        coverage += f" Comment counts may be low: the comment feed stopped after {MAX_COMMENT_PAGES} pages."
+        if via_gateway:
+            coverage += " The source returned an incomplete set of comments."
+        else:
+            coverage += f" Comment counts may be low: the comment feed stopped after {MAX_COMMENT_PAGES} pages."
     if not posts_complete:
-        coverage += f" The post list stopped at {LISTING_POSTS} posts, so older posts in that window weren't read."
+        if via_gateway:
+            coverage += " The source returned an incomplete set of posts for this time window."
+        else:
+            coverage += f" The post list stopped at {LISTING_POSTS} posts, so older posts in that window weren't read."
     if cut_groups:
         coverage += f" {cut_groups} groups a local tool found were cut off before the model read them."
     read_in_full = posts_complete and comments_complete and not omitted["posts"] and not omitted["comments"] and not cut_groups

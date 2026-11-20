@@ -8,6 +8,9 @@ traces/
 outputs/
 # Saved sessions and snapshots.
 .agent/
+# Gateway source bindings and local credential references.
+gateway.toml
+gateway.local.toml
 # Local settings and, later, AWS credentials.
 .env
 .env.*

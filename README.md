@@ -99,10 +99,11 @@ anything downstream that wants the items rather than the page: the same per-valu
 built from, each source's counts, the `left_out` rows, and separate counts of posts, values and evidence.
 `schema_version` says which shape that is, and it's kept in the harness's records, not the tool's arguments.
 
-Without logging in, Reddit allows about one request a minute. `read_subreddit` reads the post list and
-then the subreddit's comment feed, 100 comments a request, so a day of a subreddit takes a minute or
-two. Agents running at once on one machine take turns with each host, so they don't use up each
-other's budget.
+Use [the tool gateway](docs/gateway.md) for approved Reddit integrations. Reddit
+[ended RSS support](https://support.reddithelp.com/hc/en-us/articles/55472297340308-Changelog-November-10-2026)
+in November 2026. The original RSS reader is still available to existing callers and offline tests.
+In gateway mode, `read_subreddit` gets posts and comments from the configured provider and keeps the
+same report and trace formats.
 
 Each run writes its steps to `traces/<run_id>.jsonl`: every model call, each tool result with the tool the
 model asked for and the one that ran, `artifact_saved` (with the same records as `--report-json`) or
